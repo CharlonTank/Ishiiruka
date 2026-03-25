@@ -44,9 +44,29 @@
 // The Rust library that houses a "shadow" EXI Device that we can call into.
 #include "SlippiRustExtensions.h"
 
+#include <fstream>
+#include <ctime>
+
 #define FRAME_INTERVAL 900
 #define SLEEP_TIME_MS 8
 #define WRITE_FILE_SLEEP_TIME_MS 85
+
+static void warmupLog(const char *fmt, ...) {
+	static std::ofstream logFile;
+	if (!logFile.is_open()) {
+		logFile.open("warmup_debug.log", std::ios::app);
+	}
+	char buf[512];
+	va_list args;
+	va_start(args, fmt);
+	vsnprintf(buf, sizeof(buf), fmt, args);
+	va_end(args);
+	time_t now = time(nullptr);
+	char timebuf[32];
+	strftime(timebuf, sizeof(timebuf), "%H:%M:%S", localtime(&now));
+	logFile << "[" << timebuf << "] " << buf << std::endl;
+	logFile.flush();
+}
 
 // #define LOCAL_TESTING
 
@@ -1241,6 +1261,87 @@ void CEXISlippi::handleOnlineInputs(u8 *payload)
 {
 	m_read_queue.clear();
 
+	s32 warmupFrame = Common::swap32(&payload[0]);
+
+	// On frame 1, do initialization (skip most for warmup)
+	if (warmupFrame == 1 && !isWarmupActive)
+	{
+		availableSavestates.clear();
+		activeSavestates.clear();
+
+		for (int i = 0; i < ROLLBACK_MAX_FRAMES; i++)
+		{
+			availableSavestates.push_back(std::make_unique<SlippiSavestate>());
+		}
+
+		isConnectionStalled = false;
+		stallFrameCount = 0;
+		framesToSkip = 0;
+		isCurrentlySkipping = false;
+		framesToAdvance = 0;
+		isCurrentlyAdvancing = false;
+		fallBehindCounter = 0;
+		fallFarBehindCounter = 0;
+
+		localSelections.Reset();
+	}
+
+	// During warmup, don't exchange inputs over network - return continue with dummy data
+	if (isWarmupActive) {
+		// Check if real opponent was found - signal game termination
+		auto realMmState = matchmaking->GetMatchmakeState();
+		if (realMmState == SlippiMatchmaking::ProcessState::CONNECTION_SUCCESS) {
+			warmupLog("handleOnlineInputs: opponent found! frame=%d, terminating warmup", warmupFrame);
+			warmupOpponentFound = true;
+			isWarmupActive = false;
+			m_read_queue.push_back(3); // FRAME_RESP_TERMINATE - signal disconnect to end game
+			return;
+		}
+
+		// Check for errors
+		if (realMmState == SlippiMatchmaking::ProcessState::ERROR_ENCOUNTERED ||
+		    realMmState == SlippiMatchmaking::ProcessState::IDLE) {
+			warmupLog("handleOnlineInputs: mm error/idle (state=%d), terminating warmup frame=%d", realMmState, warmupFrame);
+			isWarmupActive = false;
+			m_read_queue.push_back(3); // FRAME_RESP_TERMINATE
+			return;
+		}
+
+		// Normal warmup frame - return data that keeps rollback system happy
+		if (warmupFrame % 300 == 0)
+			warmupLog("handleOnlineInputs: warmup frame %d, mmState=%d", warmupFrame, realMmState);
+
+		s32 finalizedFrame = Common::swap32(&payload[4]);
+
+		m_read_queue.push_back(1); // FRAME_RESP_CONTINUE
+
+		// Remote player count
+		m_read_queue.push_back(1);
+
+		// Checksum data for each remote player - use negative frame to disable desync detection
+		for (int i = 0; i < SLIPPI_REMOTE_PLAYER_MAX; i++) {
+			appendWordToBuffer(&m_read_queue, static_cast<u32>(-1)); // checksum frame = -1 (skip check)
+			appendWordToBuffer(&m_read_queue, 0); // checksum
+		}
+
+		// Latest frame for each remote player = current frame (no lag)
+		for (int i = 0; i < SLIPPI_REMOTE_PLAYER_MAX; i++) {
+			appendWordToBuffer(&m_read_queue, static_cast<u32>(warmupFrame));
+		}
+
+		// Smallest latest frame
+		appendWordToBuffer(&m_read_queue, static_cast<u32>(warmupFrame));
+
+		// Pad data - fill all ROLLBACK_MAX_FRAMES slots with empty inputs
+		// for all remote player slots
+		for (int i = 0; i < SLIPPI_REMOTE_PLAYER_MAX; i++) {
+			std::vector<u8> emptyPads(SLIPPI_PAD_FULL_SIZE * ROLLBACK_MAX_FRAMES, 0);
+			m_read_queue.insert(m_read_queue.end(), emptyPads.begin(), emptyPads.end());
+		}
+
+		return;
+	}
+
 	s32 frame = Common::swap32(&payload[0]);
 	s32 finalizedFrame = Common::swap32(&payload[4]);
 	u32 finalizedFrameChecksum = Common::swap32(&payload[8]);
@@ -1833,7 +1934,7 @@ void CEXISlippi::prepareOpponentInputs(s32 frame, bool shouldSkip)
 void CEXISlippi::handleCaptureSavestate(u8 *payload)
 {
 #ifndef IS_PLAYBACK
-	if (isDisconnected())
+	if (isWarmupActive || isDisconnected())
 		return;
 #endif
 
@@ -1873,6 +1974,8 @@ void CEXISlippi::handleCaptureSavestate(u8 *payload)
 
 void CEXISlippi::handleLoadSavestate(u8 *payload)
 {
+	if (isWarmupActive) return;
+
 	s32 frame = payload[0] << 24 | payload[1] << 16 | payload[2] << 8 | payload[3];
 	u32 *preserveArr = (u32 *)(&payload[4]);
 
@@ -1987,6 +2090,12 @@ void CEXISlippi::startFindMatch(u8 *payload)
 
 	matchmaking->FindMatch(search);
 #endif
+
+	// Reset warmup state when starting a new search (warmup activated separately by player)
+	isWarmupActive = false;
+	warmupOpponentFound = false;
+	warmupMatchBlockReady = false;
+	cachedWarmupResponse.clear();
 }
 
 bool CEXISlippi::doesTagMatchInput(u8 *input, u8 inputLen, std::string tag)
@@ -2137,6 +2246,21 @@ void CEXISlippi::prepareOnlineMatchState()
 	auto errorState = SlippiMatchmaking::ProcessState::ERROR_ENCOUNTERED;
 	SlippiMatchmaking::ProcessState mmState = !forcedError.empty() ? errorState : matchmaking->GetMatchmakeState();
 
+	// Auto-restart search after warmup if matchmaking expired
+	if (shouldRestartSearchAfterWarmup) {
+		shouldRestartSearchAfterWarmup = false;
+		warmupLog("prepareOnlineMatchState: back from warmup, mmState=%d", mmState);
+		if (mmState == SlippiMatchmaking::ProcessState::IDLE ||
+		    mmState == SlippiMatchmaking::ProcessState::ERROR_ENCOUNTERED)
+		{
+			warmupLog("prepareOnlineMatchState: restarting search (mm expired)");
+			forcedError.clear();
+			matchmaking = std::make_unique<SlippiMatchmaking>(slprs_exi_device_ptr, user.get());
+			matchmaking->FindMatch(lastSearch);
+			mmState = matchmaking->GetMatchmakeState();
+		}
+	}
+
 #ifdef LOCAL_TESTING
 	if (localSelections.isCharacterSelected || isLocalConnected)
 	{
@@ -2144,6 +2268,161 @@ void CEXISlippi::prepareOnlineMatchState()
 		isLocalConnected = true;
 	}
 #endif
+
+	// Warmup mode: when searching, fake a CONNECTION_SUCCESS with CPU opponent
+	if (isWarmupActive && mmState != SlippiMatchmaking::ProcessState::IDLE &&
+	    mmState != SlippiMatchmaking::ProcessState::ERROR_ENCOUNTERED &&
+	    mmState != SlippiMatchmaking::ProcessState::CONNECTION_SUCCESS)
+	{
+		// If we already built the warmup response, just return the cached version
+		if (warmupMatchBlockReady)
+		{
+			m_read_queue.insert(m_read_queue.end(), cachedWarmupResponse.begin(), cachedWarmupResponse.end());
+			return;
+		}
+
+		// Still searching - return fake CONNECTION_SUCCESS for CPU warmup
+		m_read_queue.push_back(SlippiMatchmaking::ProcessState::CONNECTION_SUCCESS);
+		m_read_queue.push_back(1); // local player ready
+		m_read_queue.push_back(1); // remote player ready
+		m_read_queue.push_back(0); // local player index
+		m_read_queue.push_back(1); // remote player index
+
+		// RNG offset
+		u32 warmupRng = generator() % 0xFFFFFFFF;
+		appendWordToBuffer(&m_read_queue, warmupRng);
+
+		// Delay frames (minimal for local CPU)
+		m_read_queue.push_back(1);
+
+		// Chat message fields (empty)
+		m_read_queue.push_back(0); // sent chat msg
+		m_read_queue.push_back(0); // chat msg id
+		m_read_queue.push_back(0); // chat msg player idx
+
+		// Ranks
+		m_read_queue.push_back(0); // p1 rank
+		m_read_queue.push_back(0); // p2 rank
+
+		// VS team groupings (left: p1, right: p2)
+		std::vector<u8> leftTeam = {0, 0, 0, 1};
+		std::vector<u8> rightTeam = {1, 0, 0, 1};
+		m_read_queue.insert(m_read_queue.end(), leftTeam.begin(), leftTeam.end());
+		m_read_queue.insert(m_read_queue.end(), rightTeam.begin(), rightTeam.end());
+
+		// Local player name
+		auto userInfo = user->GetUserInfo();
+		std::string localName = ConvertStringForGame(userInfo.displayName, MAX_NAME_LENGTH);
+		m_read_queue.insert(m_read_queue.end(), localName.begin(), localName.end());
+
+		// P1-P4 names (p1 = local, p2 = "CPU", p3/p4 = empty)
+		std::string p1Name = ConvertStringForGame(userInfo.displayName, MAX_NAME_LENGTH);
+		m_read_queue.insert(m_read_queue.end(), p1Name.begin(), p1Name.end());
+		std::string cpuName = ConvertStringForGame("CPU Lv." + std::to_string(warmupCpuLevel), MAX_NAME_LENGTH);
+		m_read_queue.insert(m_read_queue.end(), cpuName.begin(), cpuName.end());
+		std::string emptyName = ConvertStringForGame("", MAX_NAME_LENGTH);
+		m_read_queue.insert(m_read_queue.end(), emptyName.begin(), emptyName.end());
+		m_read_queue.insert(m_read_queue.end(), emptyName.begin(), emptyName.end());
+
+		// Opponent name
+		m_read_queue.insert(m_read_queue.end(), cpuName.begin(), cpuName.end());
+
+		// Connect codes (empty for all 4 players)
+		std::string emptyCode = ConvertConnectCodeForGame("");
+		for (int i = 0; i < 4; i++) {
+			m_read_queue.insert(m_read_queue.end(), emptyCode.begin(), emptyCode.end());
+		}
+
+		// UIDs (empty)
+		std::string emptyUid = "";
+		emptyUid.resize(29);
+		for (int i = 0; i < 4; i++) {
+			m_read_queue.insert(m_read_queue.end(), emptyUid.begin(), emptyUid.end());
+		}
+
+		// Error message (empty)
+		std::string emptyErr = ConvertStringForGame("", 120);
+		m_read_queue.insert(m_read_queue.end(), emptyErr.begin(), emptyErr.end());
+
+		// Build warmup match block - use the same static template as the real one
+		std::vector<u8> warmupMatchBlock = {
+		    0x32, 0x01, 0x86, 0x4C, 0xC3, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0x6E, 0x00, 0x1F, 0x00, 0x00,
+		    0x01, 0xE0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF,
+		    0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x3F, 0x80, 0x00, 0x00, 0x3F, 0x80, 0x00, 0x00, 0x3F, 0x80,
+		    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x14, 0x00, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00, 0x09, 0x00, 0x78, 0x00,
+		    0xC0, 0x00, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3F, 0x80, 0x00, 0x00, 0x3F, 0x80,
+		    0x00, 0x00, 0x3F, 0x80, 0x00, 0x00, 0x05, 0x00, 0x04, 0x01, 0x00, 0x01, 0x00, 0x00, 0x09, 0x00, 0x78, 0x00,
+		    0xC0, 0x00, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3F, 0x80, 0x00, 0x00, 0x3F, 0x80,
+		    0x00, 0x00, 0x3F, 0x80, 0x00, 0x00, 0x15, 0x03, 0x04, 0x00, 0x00, 0xFF, 0x00, 0x00, 0x09, 0x00, 0x78, 0x00,
+		    0xC0, 0x00, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3F, 0x80, 0x00, 0x00, 0x3F, 0x80,
+		    0x00, 0x00, 0x3F, 0x80, 0x00, 0x00, 0x15, 0x03, 0x04, 0x00, 0x00, 0xFF, 0x00, 0x00, 0x09, 0x00, 0x78, 0x00,
+		    0xC0, 0x00, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3F, 0x80, 0x00, 0x00, 0x3F, 0x80,
+		    0x00, 0x00, 0x3F, 0x80, 0x00, 0x00, 0x21, 0x03, 0x04, 0x00, 0x00, 0xFF, 0x00, 0x00, 0x09, 0x00, 0x78, 0x00,
+		    0x40, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3F, 0x80, 0x00, 0x00, 0x3F, 0x80,
+		    0x00, 0x00, 0x3F, 0x80, 0x00, 0x00, 0x21, 0x03, 0x04, 0x00, 0x00, 0xFF, 0x00, 0x00, 0x09, 0x00, 0x78, 0x00,
+		    0x40, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3F, 0x80, 0x00, 0x00, 0x3F, 0x80,
+		    0x00, 0x00, 0x3F, 0x80, 0x00, 0x00,
+		};
+
+		// Set P1 = local player's character (human, type 0)
+		warmupMatchBlock[0x60] = localSelections.characterId;
+		warmupMatchBlock[0x61] = 0; // Human player type
+		warmupMatchBlock[0x62] = 4; // 4 stocks
+		warmupMatchBlock[0x63] = localSelections.characterColor;
+
+		// Set P2 = CPU Level 9 with random character
+		warmupMatchBlock[0x60 + 0x24] = warmupCpuCharId;
+		warmupMatchBlock[0x61 + 0x24] = 1; // CPU player type
+		warmupMatchBlock[0x62 + 0x24] = 4; // 4 stocks
+		warmupMatchBlock[0x63 + 0x24] = 0; // Default color
+		warmupMatchBlock[0x6F + 0x24] = warmupCpuLevel; // CPU Level at +0x0F in PlayerInitData
+
+		// Set P3/P4 to none
+		warmupMatchBlock[0x61 + 2 * 0x24] = 3; // None
+		warmupMatchBlock[0x61 + 3 * 0x24] = 3; // None
+
+		// Set teams off
+		warmupMatchBlock[0x8] = 0;
+
+		// Use selected stage from stage index
+		std::vector<u16> stageList = {0x2, 0x3, 0x8, 0x1C, 0x1F, 0x20}; // FoD, Pokemon, Yoshi, DL, BF, FD
+		u16 warmupStage = stageList[warmupStageIdx < stageList.size() ? warmupStageIdx : 2];
+		u16 *stage = (u16 *)&warmupMatchBlock[0xE];
+		*stage = Common::swap16(warmupStage);
+
+		// Enable pause during warmup (clear bit 3 of byte at offset 2)
+		warmupMatchBlock[2] = warmupMatchBlock[2] & 0xF7;
+
+		m_read_queue.insert(m_read_queue.end(), warmupMatchBlock.begin(), warmupMatchBlock.end());
+
+		// Match ID (empty for warmup)
+		std::string warmupMatchId = "";
+		warmupMatchId.resize(51);
+		m_read_queue.insert(m_read_queue.end(), warmupMatchId.begin(), warmupMatchId.end());
+
+		// Alt stage mode
+		m_read_queue.push_back(0);
+
+		// Warmup flag (NEW - this is MSRB_IS_WARMUP, 1 byte appended at the end)
+		m_read_queue.push_back(1);
+
+		// Cache this response so subsequent calls return identical data
+		cachedWarmupResponse = m_read_queue;
+		warmupMatchBlockReady = true;
+
+		return; // Don't fall through to normal logic
+	}
+
+	// When real opponent is found during warmup, transition
+	if (isWarmupActive && mmState == SlippiMatchmaking::ProcessState::CONNECTION_SUCCESS) {
+		warmupOpponentFound = true;
+		isWarmupActive = false;
+		warmupMatchBlockReady = false;
+		cachedWarmupResponse.clear();
+		// Fall through to normal CONNECTION_SUCCESS handling below
+	}
 
 	m_read_queue.push_back(mmState); // Matchmaking State
 
@@ -2736,6 +3015,9 @@ void CEXISlippi::prepareOnlineMatchState()
 
 	// Add alt stage mode to output
 	m_read_queue.push_back(static_cast<u8>(alt_stage_mode));
+
+	// Warmup flag - 0 means this is a real match
+	m_read_queue.push_back(0);
 }
 
 u16 CEXISlippi::getRandomStage()
@@ -3084,6 +3366,13 @@ void CEXISlippi::handleConnectionCleanup()
 	// Reset play session
 	isPlaySessionActive = false;
 
+	// Reset warmup state
+	isWarmupActive = false;
+	warmupOpponentFound = false;
+	warmupMatchBlockReady = false;
+	shouldRestartSearchAfterWarmup = false;
+	cachedWarmupResponse.clear();
+
 #ifdef LOCAL_TESTING
 	isLocalConnected = false;
 #endif
@@ -3100,8 +3389,61 @@ void CEXISlippi::prepareNewSeed()
 	appendWordToBuffer(&m_read_queue, newSeed);
 }
 
+void CEXISlippi::prepareWarmupState()
+{
+	m_read_queue.clear();
+
+	if (warmupOpponentFound) {
+		m_read_queue.push_back(1); // Opponent found - end warmup
+	} else if (isWarmupActive) {
+		m_read_queue.push_back(0); // Still searching
+	} else {
+		m_read_queue.push_back(2); // Not in warmup
+	}
+}
+
+void CEXISlippi::handleActivateWarmup(u8 *payload)
+{
+	// Only activate warmup if matchmaking is in progress
+	auto mmState = matchmaking->GetMatchmakeState();
+	if (mmState == SlippiMatchmaking::ProcessState::INITIALIZING ||
+	    mmState == SlippiMatchmaking::ProcessState::MATCHMAKING ||
+	    mmState == SlippiMatchmaking::ProcessState::OPPONENT_CONNECTING)
+	{
+		warmupCpuCharId = payload[0];
+		warmupCpuLevel = payload[1];
+		warmupStageIdx = payload[2];
+
+		// Clamp values
+		if (warmupCpuCharId >= 26) warmupCpuCharId = 2; // Fox
+		if (warmupCpuLevel < 1) warmupCpuLevel = 1;
+		if (warmupCpuLevel > 9) warmupCpuLevel = 9;
+		if (warmupStageIdx >= 6) warmupStageIdx = 2; // Yoshi's Story
+
+		isWarmupActive = true;
+		warmupOpponentFound = false;
+		warmupMatchBlockReady = false;
+		cachedWarmupResponse.clear();
+		warmupLog("handleActivateWarmup: char=%d level=%d stage=%d", warmupCpuCharId, warmupCpuLevel, warmupStageIdx);
+	}
+}
+
 void CEXISlippi::handleReportGame(const SlippiExiTypes::ReportGameQuery &query)
 {
+	// Don't report warmup games
+	if (warmupOpponentFound || isWarmupActive) {
+		warmupLog("handleReportGame: warmup game ended (oppFound=%d, active=%d)", warmupOpponentFound, isWarmupActive);
+		isWarmupActive = false;
+		warmupMatchBlockReady = false;
+		cachedWarmupResponse.clear();
+		if (!warmupOpponentFound) {
+			shouldRestartSearchAfterWarmup = true;
+			warmupLog("handleReportGame: will restart search after warmup");
+		}
+		warmupOpponentFound = false;
+		return;
+	}
+
 	std::string matchId = recentMmResult.id;
 	SlippiMatchmakingOnlinePlayMode onlineMode = static_cast<SlippiMatchmakingOnlinePlayMode>(query.onlineMode);
 	u32 durationFrames = query.frameLength;
@@ -3498,6 +3840,12 @@ void CEXISlippi::DMAWrite(u32 _uAddr, u32 _uSize)
 			break;
 		case CMD_CLEANUP_CONNECTION:
 			handleConnectionCleanup();
+			break;
+		case CMD_GET_WARMUP_STATE:
+			prepareWarmupState();
+			break;
+		case CMD_ACTIVATE_WARMUP:
+			handleActivateWarmup(&memPtr[bufLoc + 1]);
 			break;
 		case CMD_LOG_MESSAGE:
 			logMessageFromGame(&memPtr[bufLoc + 1]);
