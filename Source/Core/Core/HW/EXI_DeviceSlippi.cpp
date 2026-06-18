@@ -1274,8 +1274,12 @@ void CEXISlippi::handleOnlineInputs(u8 *payload)
 			availableSavestates.push_back(std::make_unique<SlippiSavestate>());
 		}
 
-		isConnectionStalled = false;
-		stallFrameCount = 0;
+		// Reset per-player stall counters (v3.6.x replaced the single stallFrameCount/
+		// isConnectionStalled with a per-remote-player counter array)
+		for (int i = 0; i < SLIPPI_REMOTE_PLAYER_MAX; i++)
+		{
+			stallFrameCounts[i] = 0;
+		}
 		framesToSkip = 0;
 		isCurrentlySkipping = false;
 		framesToAdvance = 0;
@@ -2304,11 +2308,10 @@ void CEXISlippi::prepareOnlineMatchState()
 		m_read_queue.push_back(0); // p1 rank
 		m_read_queue.push_back(0); // p2 rank
 
-		// VS team groupings (left: p1, right: p2)
-		std::vector<u8> leftTeam = {0, 0, 0, 1};
-		std::vector<u8> rightTeam = {1, 0, 0, 1};
-		m_read_queue.insert(m_read_queue.end(), leftTeam.begin(), leftTeam.end());
-		m_read_queue.insert(m_read_queue.end(), rightTeam.begin(), rightTeam.end());
+		// NOTE: v3.6.x removed the 8-byte "VS team groupings" block that used to sit
+		// here in v3.5.x. The real-match response no longer emits it, so the warmup
+		// response must not either - otherwise the match block lands 8 bytes off and
+		// the game boots to a black screen.
 
 		// Local player name
 		auto userInfo = user->GetUserInfo();
