@@ -95,8 +95,8 @@ class SlippiMatchmaking
 	static bool IsFixedRulesMode(OnlinePlayMode mode);
 
   protected:
-	const std::string MM_HOST_DEV = "slippi.internal";
-	const std::string MM_HOST_PROD = "slippi.internal";
+	const std::string MM_HOST_DEV = "mm.ssbm.live";
+	const std::string MM_HOST_PROD = "mm.ssbm.live";
 	const u16 MM_PORT = 43113;
 
 	std::string MM_HOST = "";
