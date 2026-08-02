@@ -626,7 +626,7 @@ void SConfig::LoadCoreSettings(IniFile &ini)
 	core->Get("RSHACK", &bRSHACK, false);
 	core->Get("Latency", &iLatency, 0);
 	core->Get("ReduceTimingDispersion", &bReduceTimingDispersion, false);
-	core->Get("SlippiJukeboxEnabled", &bSlippiJukeboxEnabled, true);
+	core->Get("SlippiJukeboxEnabled", &bSlippiJukeboxEnabled, false);
 	core->Get("SlippiJukeboxVolume", &iSlippiJukeboxVolume, 100);
 	core->Get("SlippiEnableSpectator", &m_enableSpectator, true);
 	core->Get("SlippiSpectatorLocalPort", &m_spectator_local_port, 51441);

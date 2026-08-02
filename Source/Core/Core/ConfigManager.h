@@ -152,7 +152,7 @@ struct SConfig : NonCopyable
 	bool bReduceTimingDispersion = false;
 	bool bSlippiPlayerRankDisplay = true;
 	bool bSlippiOpponentRankDisplay = true;
-	bool bSlippiJukeboxEnabled = true;
+	bool bSlippiJukeboxEnabled = false;
 	int iSlippiJukeboxVolume = 100;
 
 	MeleeLagReductionCode iLagReductionCode = MELEE_LAG_REDUCTION_CODE_UNSET;
