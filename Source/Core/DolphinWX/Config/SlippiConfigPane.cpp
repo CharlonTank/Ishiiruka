@@ -411,8 +411,9 @@ void SlippiNetplayConfigPane::OnLogInClicked(wxCommandEvent &event)
 	std::thread([this] {
 		bool ok = SlippiAuth::DeviceLogin();
 
-		// Touch widgets on the UI thread only.
-		wxTheApp->CallAfter([this, ok] {
+		// Touch widgets on the UI thread only. wxEvtHandler::CallAfter is
+		// available on the pane itself, no wxTheApp include needed.
+		this->CallAfter([this, ok] {
 			m_slippi_login_status->SetLabel(ok ? _("Logged in — launch Melee and you're online.")
 			                                  : _("Login failed or timed out. Try again."));
 			m_slippi_login_button->Enable();
