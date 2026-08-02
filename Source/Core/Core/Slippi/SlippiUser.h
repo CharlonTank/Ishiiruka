@@ -59,3 +59,12 @@ class SlippiUser
 	// Do *not* do any cleanup of this! The EXI device will handle it.
 	uintptr_t slprs_exi_device_ptr;
 };
+
+namespace SlippiAuth
+{
+// Signs this computer in without a running game, so Online Play is already
+// correct on Melee's first screen (the game builds that submenu when you enter
+// it, so a login landing mid-menu can never show up there). Blocks until the
+// player approves in their browser — call it off the UI thread.
+bool DeviceLogin();
+} // namespace SlippiAuth

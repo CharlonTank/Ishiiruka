@@ -1,4 +1,6 @@
 #include "Common/Common.h"
+#include "Common/CommonPaths.h"
+#include "Common/FileUtil.h"
 #include "Common/Logging/Log.h"
 
 #include "SlippiUser.h"
@@ -90,3 +92,12 @@ bool SlippiUser::IsLoggedIn()
 {
 	return slprs_user_get_is_logged_in(slprs_exi_device_ptr);
 }
+
+namespace SlippiAuth
+{
+bool DeviceLogin()
+{
+	std::string userJsonPath = File::GetSlippiUserConfigFolder() + DIR_SEP + "user.json";
+	return slprs_user_device_login(userJsonPath.c_str());
+}
+} // namespace SlippiAuth

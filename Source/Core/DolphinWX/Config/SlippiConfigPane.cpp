@@ -6,8 +6,7 @@
 
 #include <thread>
 
-#include "Common/FileUtil.h"
-#include "SlippiRustExtensions.h"
+#include "Core/Slippi/SlippiUser.h"
 
 #include <cassert>
 #include <string>
@@ -407,12 +406,10 @@ void SlippiNetplayConfigPane::OnLogInClicked(wxCommandEvent &event)
 	m_slippi_login_button->Disable();
 	m_slippi_login_status->SetLabel(_("Waiting for the browser..."));
 
-	std::string userJsonPath = File::GetSlippiUserConfigFolder() + DIR_SEP + "user.json";
-
 	// The flow blocks until the player approves (or it times out), so it can't
 	// run on the UI thread.
-	std::thread([this, userJsonPath] {
-		bool ok = slprs_user_device_login(userJsonPath.c_str());
+	std::thread([this] {
+		bool ok = SlippiAuth::DeviceLogin();
 
 		// Touch widgets on the UI thread only.
 		wxTheApp->CallAfter([this, ok] {
