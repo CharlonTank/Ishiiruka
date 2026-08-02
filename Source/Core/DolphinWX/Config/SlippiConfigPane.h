@@ -45,6 +45,7 @@ class SlippiNetplayConfigPane final : public wxPanel
 	void OnToggleJukeboxEnabled(wxCommandEvent &event);
 	void OnJukeboxVolumeUpdate(wxCommandEvent &event);
 	void OnToggleShowPlayerRank(wxCommandEvent &event);
+	void OnLogInClicked(wxCommandEvent &event);
 	void OnToggleShowOpponentRank(wxCommandEvent &event);
 
 	wxArrayString m_slippi_enable_quick_chat_strings;
@@ -63,6 +64,8 @@ class SlippiNetplayConfigPane final : public wxPanel
 
 	wxCheckBox *m_reduce_timing_dispersion_checkbox;
 
+	wxButton *m_slippi_login_button;
+	wxStaticText *m_slippi_login_status;
 	wxCheckBox *m_slippi_show_player_rank;
 	wxCheckBox *m_slippi_show_opponent_rank;
 

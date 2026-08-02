@@ -4,6 +4,11 @@
 
 #include "DolphinWX/Config/SlippiConfigPane.h"
 
+#include <thread>
+
+#include "Common/FileUtil.h"
+#include "SlippiRustExtensions.h"
+
 #include <cassert>
 #include <string>
 
@@ -105,6 +110,12 @@ void SlippiNetplayConfigPane::InitializeGUI()
 	    new wxCheckBox(this, wxID_ANY, _("Show your rank (Character Select and Ranked Setup Screen)"));
 	m_slippi_show_opponent_rank = new wxCheckBox(this, wxID_ANY, _("Show opponent's rank (Ranked Setup Screen)"));
 
+	m_slippi_login_button = new wxButton(this, wxID_ANY, _("Log in to ssbm.live"));
+	m_slippi_login_button->SetToolTip(_("Signs this computer in before you launch Melee, so Online Play is "
+	                                    "ready from the first screen. Opens ssbm.live in your browser; one "
+	                                    "click there and you're done."));
+	m_slippi_login_status = new wxStaticText(this, wxID_ANY, "");
+
 	m_slippi_jukebox_enabled_checkbox = new wxCheckBox(this, wxID_ANY, _("Enable Music"));
 
 	// WASAPI does not work with this and we want a note for the user.
@@ -162,6 +173,9 @@ void SlippiNetplayConfigPane::InitializeGUI()
 	                           wxALIGN_CENTER_VERTICAL);
 	sSlippiOnlineSettings->Add(m_slippi_netplay_lan_ip_ctrl, wxGBPosition(3, 1), wxDefaultSpan,
 	                           wxALIGN_LEFT | wxRESERVE_SPACE_EVEN_IF_HIDDEN);
+
+	sSlippiOnlineSettings->Add(m_slippi_login_button, wxGBPosition(4, 0), wxDefaultSpan, wxALIGN_CENTER_VERTICAL);
+	sSlippiOnlineSettings->Add(m_slippi_login_status, wxGBPosition(4, 1), wxDefaultSpan, wxALIGN_CENTER_VERTICAL);
 
 	wxStaticBoxSizer *const sbSlippiOnlineSettings =
 	    new wxStaticBoxSizer(wxVERTICAL, this, _("Slippi Online Settings"));
@@ -288,6 +302,7 @@ void SlippiNetplayConfigPane::BindEvents()
 	m_slippi_show_player_rank->Bind(wxEVT_CHECKBOX, &SlippiNetplayConfigPane::OnToggleShowPlayerRank, this);
 	m_slippi_show_opponent_rank->Bind(wxEVT_CHECKBOX, &SlippiNetplayConfigPane::OnToggleShowOpponentRank, this);
 
+	m_slippi_login_button->Bind(wxEVT_BUTTON, &SlippiNetplayConfigPane::OnLogInClicked, this);
 	m_slippi_jukebox_enabled_checkbox->Bind(wxEVT_CHECKBOX, &SlippiNetplayConfigPane::OnToggleJukeboxEnabled, this);
 	m_slippi_jukebox_volume_slider->Bind(wxEVT_SLIDER, &SlippiNetplayConfigPane::OnJukeboxVolumeUpdate, this);
 }
@@ -382,6 +397,30 @@ void SlippiNetplayConfigPane::OnToggleShowPlayerRank(wxCommandEvent &event)
 void SlippiNetplayConfigPane::OnToggleShowOpponentRank(wxCommandEvent &event)
 {
 	SConfig::GetInstance().bSlippiOpponentRankDisplay = m_slippi_show_opponent_rank->GetValue();
+}
+
+void SlippiNetplayConfigPane::OnLogInClicked(wxCommandEvent &event)
+{
+	// Logging in from here — before Melee boots — is what makes Online Play
+	// correct on its very first screen: the game builds that submenu when you
+	// enter it, so a login that lands while you sit on it can never show up.
+	m_slippi_login_button->Disable();
+	m_slippi_login_status->SetLabel(_("Waiting for the browser..."));
+
+	std::string userJsonPath = File::GetSlippiUserConfigFolder() + DIR_SEP + "user.json";
+
+	// The flow blocks until the player approves (or it times out), so it can't
+	// run on the UI thread.
+	std::thread([this, userJsonPath] {
+		bool ok = slprs_user_device_login(userJsonPath.c_str());
+
+		// Touch widgets on the UI thread only.
+		wxTheApp->CallAfter([this, ok] {
+			m_slippi_login_status->SetLabel(ok ? _("Logged in — launch Melee and you're online.")
+			                                  : _("Login failed or timed out. Try again."));
+			m_slippi_login_button->Enable();
+		});
+	}).detach();
 }
 
 void SlippiNetplayConfigPane::OnToggleJukeboxEnabled(wxCommandEvent &event)
