@@ -82,8 +82,10 @@ SlippiNetplayClient::SlippiNetplayClient(std::vector<std::string> addrs, std::ve
 	this->m_localPlayerIdxs = localPlayerIdxs;
 	// The port <-> remote index mappings assume this list is ascending
 	std::sort(this->m_localPlayerIdxs.begin(), this->m_localPlayerIdxs.end());
+	// localPadQueues is a fixed array — never accept more seats than it holds.
+	if (this->m_localPlayerIdxs.size() > SLIPPI_LOCAL_PLAYER_MAX)
+		this->m_localPlayerIdxs.resize(SLIPPI_LOCAL_PLAYER_MAX);
 	this->m_remotePlayerIdxsByConn = remotePlayerIdxsByConn;
-	this->localPadQueues.resize(this->m_localPlayerIdxs.size());
 
 	// Set up remote player data structures. Entries past m_remotePlayerCount are never read
 	int j = 0;
@@ -1223,9 +1225,9 @@ void SlippiNetplayClient::StartSlippiGame()
 	// Reset variables to start a new game
 	hasGameStarted = false;
 
-	for (auto &queue : localPadQueues)
+	for (size_t i = 0; i < m_localPlayerIdxs.size(); i++)
 	{
-		queue.clear();
+		localPadQueues[i].clear();
 	}
 
 	for (int i = 0; i < m_remotePlayerCount; i++)
@@ -1268,7 +1270,7 @@ void SlippiNetplayClient::SendSlippiPad(std::unique_ptr<SlippiPad> pad, u8 strea
 		return;
 	}
 
-	if (streamIdx >= localPadQueues.size())
+	if (streamIdx >= m_localPlayerIdxs.size())
 	{
 		return;
 	}

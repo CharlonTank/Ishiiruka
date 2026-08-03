@@ -32,6 +32,8 @@
 #define SLIPPI_ONLINE_LOCKSTEP_INTERVAL 30 // Number of frames to wait before attempting to time-sync
 #define SLIPPI_PING_DISPLAY_INTERVAL 60
 #define SLIPPI_REMOTE_PLAYER_MAX 3
+// Local players hosted by ONE client (couch co-op seats 2 on a single setup).
+#define SLIPPI_LOCAL_PLAYER_MAX 2
 #define SLIPPI_REMOTE_PLAYER_COUNT 3
 #define SLIPPI_PLAYER_COUNT_MAX (SLIPPI_REMOTE_PLAYER_MAX + 1)
 
@@ -285,8 +287,11 @@ class SlippiNetplayClient
 	// per-peer ENet disconnects for players force-dropped from the EXI side.
 	std::atomic<bool> playerActive[SLIPPI_PLAYER_COUNT_MAX] = {};
 
-	// One queue per local player stream, parallel to m_localPlayerIdxs
-	std::vector<std::deque<std::unique_ptr<SlippiPad>>> localPadQueues; // most recent inputs at start of deque
+	// One queue per local player stream, parallel to m_localPlayerIdxs. A fixed
+	// array, not a vector: vector reallocation would need to COPY the deques,
+	// which unique_ptr forbids (MSVC/GCC reject it outright).
+	std::deque<std::unique_ptr<SlippiPad>>
+	    localPadQueues[SLIPPI_LOCAL_PLAYER_MAX]; // most recent inputs at start of deque
 	std::deque<std::unique_ptr<SlippiPad>>
 	    remotePadQueue[SLIPPI_REMOTE_PLAYER_MAX]; // most recent inputs at start of deque
 
