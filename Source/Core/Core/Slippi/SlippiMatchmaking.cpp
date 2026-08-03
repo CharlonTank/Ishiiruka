@@ -1,6 +1,8 @@
 #include "SlippiMatchmaking.h"
 #include "Common/Common.h"
+#include "Common/CommonPaths.h"
 #include "Common/ENetUtil.h"
+#include "Common/FileUtil.h"
 #include "Common/Logging/Log.h"
 #include "Common/StringUtil.h"
 #include <algorithm>
@@ -434,6 +436,41 @@ void SlippiMatchmaking::startMatchmaking()
 	request["search"] = {{"mode", m_searchSettings.mode}, {"connectCode", connectCodeBuf}};
 	request["appVersion"] = scm_slippi_semver_str;
 	request["ipAddressLan"] = lanAddr;
+
+	// Couch co-op: declare a second local player on this ticket. When a user2.json file
+	// exists next to user.json, the second seat queues as that account; otherwise the
+	// second player joins as a guest (only accepted by the server in freeplay modes)
+	if (SConfig::GetInstance().bSlippiCouchCoopPort2 >= 0)
+	{
+		request["localPlayerCount"] = 2;
+
+		bool hasUser2 = false;
+		std::string user2Path = File::GetSlippiUserConfigFolder() + DIR_SEP + "user2.json";
+		std::string user2Contents;
+		if (File::Exists(user2Path) && File::ReadFileToString(user2Path, user2Contents))
+		{
+			json user2 = json::parse(user2Contents, nullptr, false);
+			if (!user2.is_discarded() && user2.value("uid", "") != "" && user2.value("playKey", "") != "")
+			{
+				json user2Player = {{"uid", user2.value("uid", "")},
+				                    {"playKey", user2.value("playKey", "")},
+				                    {"connectCode", user2.value("connectCode", "")},
+				                    {"displayName", user2.value("displayName", "")}};
+				request["localPlayers"] = json::array({user2Player});
+				hasUser2 = true;
+			}
+			else
+			{
+				ERROR_LOG(SLIPPI_ONLINE, "[Matchmaking] user2.json exists but is invalid, queueing P2 as guest");
+			}
+		}
+
+		if (!hasUser2)
+		{
+			request["guestName"] = SConfig::GetInstance().m_slippiCouchCoopGuestName;
+		}
+	}
+
 	sendMessage(request);
 
 	// Get response from server
@@ -682,6 +719,11 @@ void SlippiMatchmaking::handleMatchmaking()
 int SlippiMatchmaking::LocalPlayerIndex()
 {
 	return m_localPlayerIndex;
+}
+
+std::vector<int> SlippiMatchmaking::GetLocalPlayerIndices()
+{
+	return m_localPlayerIndices;
 }
 
 std::vector<SlippiUser::UserInfo> SlippiMatchmaking::GetPlayerInfo()

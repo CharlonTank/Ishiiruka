@@ -180,7 +180,8 @@ CEXISlippi::CEXISlippi()
 	m_read_queue.reserve(5);
 
 	// Initialize local selections to empty
-	localSelections.Reset();
+	for (auto &selections : localSelections)
+		selections.Reset();
 
 	// Forces savestate to re-init regions when a new ISO is loaded
 	SlippiSavestate::shouldForceInit = true;
@@ -232,7 +233,8 @@ CEXISlippi::~CEXISlippi()
 	}
 	handleConnectionCleanup();
 
-	localSelections.Reset();
+	for (auto &selections : localSelections)
+		selections.Reset();
 
 	// Kill threads to prevent cleanup crash
 	g_playbackStatus->resetPlayback();
@@ -1237,7 +1239,7 @@ bool CEXISlippi::isDisconnected()
 	return status != SlippiNetplayClient::SlippiConnectStatus::NET_CONNECT_STATUS_CONNECTED;
 }
 
-void CEXISlippi::handleOnlineInputs(u8 *payload)
+void CEXISlippi::handleOnlineInputs(u8 *payload, u32 payloadLen)
 {
 	m_read_queue.clear();
 
@@ -1246,6 +1248,10 @@ void CEXISlippi::handleOnlineInputs(u8 *payload)
 	u32 finalizedFrameChecksum = Common::swap32(&payload[8]);
 	u8 delay = payload[12];
 	u8 *inputs = &payload[13];
+
+	// A v2 (couch co-op) payload carries a second local pad right after the first one.
+	// v1-sized payloads never enter this path, keeping the single-local behavior untouched
+	u8 *inputs2 = payloadLen >= ONLINE_INPUTS_V2_PAYLOAD_SIZE ? &payload[25] : nullptr;
 
 	if (frame == 1)
 	{
@@ -1278,7 +1284,8 @@ void CEXISlippi::handleOnlineInputs(u8 *payload)
 		fallFarBehindCounter = 0;
 
 		// Reset character selections such that they are cleared for next game
-		localSelections.Reset();
+		for (auto &selections : localSelections)
+			selections.Reset();
 		if (slippi_netplay)
 			slippi_netplay->StartSlippiGame();
 	}
@@ -1308,8 +1315,10 @@ void CEXISlippi::handleOnlineInputs(u8 *payload)
 	bool shouldSkip = shouldSkipOnlineFrame(frame, finalizedFrame);
 	if (shouldSkip)
 	{
-		// Send inputs that have not yet been acked
+		// Send inputs that have not yet been acked, for every local stream
 		slippi_netplay->SendSlippiPad(nullptr);
+		if (inputs2)
+			slippi_netplay->SendSlippiPad(nullptr, 1);
 	}
 	else
 	{
@@ -1317,7 +1326,7 @@ void CEXISlippi::handleOnlineInputs(u8 *payload)
 		handlePoorMatchPerformance(frame);
 
 		// Send the input for this frame along with everything that has yet to be acked
-		handleSendInputs(frame, delay, finalizedFrame, finalizedFrameChecksum, inputs);
+		handleSendInputs(frame, delay, finalizedFrame, finalizedFrameChecksum, inputs, inputs2);
 	}
 
 	prepareOpponentInputs(frame, shouldSkip);
@@ -1635,22 +1644,35 @@ bool CEXISlippi::shouldAdvanceOnlineFrame(s32 frame)
 	return false;
 }
 
-void CEXISlippi::handleSendInputs(s32 frame, u8 delay, s32 checksumFrame, u32 checksum, u8 *inputs)
+void CEXISlippi::handleSendInputs(s32 frame, u8 delay, s32 checksumFrame, u32 checksum, u8 *inputs, u8 *inputs2)
 {
 	// On the first frame sent, we need to queue up empty dummy pads for as many
-	//	frames as we have delay
+	//	frames as we have delay, for every local stream
 	if (frame == 1)
 	{
 		for (int i = 1; i <= delay; i++)
 		{
 			auto empty = std::make_unique<SlippiPad>(i);
 			slippi_netplay->SendSlippiPad(std::move(empty));
+
+			if (inputs2)
+			{
+				auto empty2 = std::make_unique<SlippiPad>(i);
+				slippi_netplay->SendSlippiPad(std::move(empty2), 1);
+			}
 		}
 	}
 
 	auto pad = std::make_unique<SlippiPad>(frame + delay, checksumFrame, checksum, inputs);
 
 	slippi_netplay->SendSlippiPad(std::move(pad));
+
+	// Couch co-op: second local pad goes to the second local stream
+	if (inputs2)
+	{
+		auto pad2 = std::make_unique<SlippiPad>(frame + delay, checksumFrame, checksum, inputs2);
+		slippi_netplay->SendSlippiPad(std::move(pad2), 1);
+	}
 }
 
 bool CEXISlippi::opponentRunahead()
@@ -1949,15 +1971,15 @@ void CEXISlippi::startFindMatch(u8 *payload)
 	if (SlippiMatchmaking::IsFixedRulesMode(search.mode))
 	{
 		// Character check
-		if (localSelections.characterId >= 26)
+		if (localSelections[0].characterId >= 26)
 		{
 			forcedError = "The character you selected is not allowed in this mode";
 			return;
 		}
 
 		// Stage check
-		if (localSelections.isStageSelected &&
-		    std::find(allowedStages.begin(), allowedStages.end(), localSelections.stageId) == allowedStages.end())
+		if (localSelections[0].isStageSelected &&
+		    std::find(allowedStages.begin(), allowedStages.end(), localSelections[0].stageId) == allowedStages.end())
 		{
 			forcedError = "The stage being requested is not allowed in this mode";
 			return;
@@ -1967,7 +1989,7 @@ void CEXISlippi::startFindMatch(u8 *payload)
 	{
 		auto isMex = SConfig::GetInstance().m_gameType == GAMETYPE_MELEE_MEX;
 		// Some special handling for teams since it is being heavily used for unranked
-		if (localSelections.characterId >= 26 && !isMex)
+		if (localSelections[0].characterId >= 26 && !isMex)
 		{
 			forcedError = "The character you selected is not allowed in this mode";
 			return;
@@ -2138,7 +2160,7 @@ void CEXISlippi::prepareOnlineMatchState()
 	SlippiMatchmaking::ProcessState mmState = !forcedError.empty() ? errorState : matchmaking->GetMatchmakeState();
 
 #ifdef LOCAL_TESTING
-	if (localSelections.isCharacterSelected || isLocalConnected)
+	if (localSelections[0].isCharacterSelected || isLocalConnected)
 	{
 		mmState = SlippiMatchmaking::ProcessState::CONNECTION_SUCCESS;
 		isLocalConnected = true;
@@ -2147,7 +2169,7 @@ void CEXISlippi::prepareOnlineMatchState()
 
 	m_read_queue.push_back(mmState); // Matchmaking State
 
-	u8 localPlayerReady = localSelections.isCharacterSelected;
+	u8 localPlayerReady = localSelections[0].isCharacterSelected;
 	u8 remotePlayersReady = 0;
 
 	auto userInfo = user->GetUserInfo();
@@ -2156,6 +2178,16 @@ void CEXISlippi::prepareOnlineMatchState()
 	if (mmState == SlippiMatchmaking::ProcessState::CONNECTION_SUCCESS)
 	{
 		localPlayerIndex = matchmaking->LocalPlayerIndex();
+
+		// Track the second local player when couch co-op is active. 0xFF = single local player
+		auto localIndices = matchmaking->GetLocalPlayerIndices();
+		localPlayerIndex2 = localIndices.size() >= 2 ? static_cast<u8>(localIndices[1]) : 0xFF;
+
+		// A couch client is only ready once every local player has selected a character
+		if (localPlayerIndex2 != 0xFF && !localSelections[1].isCharacterSelected)
+		{
+			localPlayerReady = 0;
+		}
 
 		if (!slippi_netplay)
 		{
@@ -2187,8 +2219,15 @@ void CEXISlippi::prepareOnlineMatchState()
 			}
 
 			stagePool.clear(); // Clear stage pool so that when we call getRandomStage it will use full list
-			localSelections.stageId = getRandomStage();
-			slippi_netplay->SetMatchSelections(localSelections);
+			localSelections[0].stageId = getRandomStage();
+			slippi_netplay->SetMatchSelections(localSelections[0]);
+
+			// Couch co-op: also register/announce the second local player's selections so that
+			// remote clients learn its player index (and later its character) as well
+			if (localPlayerIndex2 != 0xFF)
+			{
+				slippi_netplay->SetMatchSelections(localSelections[1], 1);
+			}
 		}
 
 #ifdef LOCAL_TESTING
@@ -2220,7 +2259,9 @@ void CEXISlippi::prepareOnlineMatchState()
 				}
 			}
 
-			if (remotePlayerCount == 1)
+			// Don't force 1v1 indices when a second local player exists (couch co-op can
+			// face a single remote player in freeplay)
+			if (remotePlayerCount == 1 && localPlayerIndex2 == 0xFF)
 			{
 				auto isDecider = slippi_netplay->IsDecider();
 				localPlayerIndex = isDecider ? 0 : 1;
@@ -2339,7 +2380,13 @@ void CEXISlippi::prepareOnlineMatchState()
 		u8 remotePlayerCount = matchmaking->RemotePlayerCount();
 		auto matchInfo = slippi_netplay->GetMatchInfo();
 		SlippiPlayerSelections lps = matchInfo->localPlayerSelections;
+		SlippiPlayerSelections lps2 = matchInfo->localPlayerSelections2;
 		auto rps = matchInfo->remotePlayerSelections;
+
+		// Couch co-op: this client hosts a second local player whose selections must be
+		// included alongside everyone else's
+		bool hasSecondLocal = localPlayerIndex2 != 0xFF;
+		u8 localPlayerCount = hasSecondLocal ? 2 : 1;
 
 #ifdef LOCAL_TESTING
 		lps.playerIdx = 0;
@@ -2371,7 +2418,7 @@ void CEXISlippi::prepareOnlineMatchState()
 #endif
 
 		// Check if someone is picking dumb characters in non-direct
-		auto localCharOk = lps.characterId < 26;
+		auto localCharOk = lps.characterId < 26 && (!hasSecondLocal || lps2.characterId < 26);
 		auto remoteCharOk = true;
 		INFO_LOG(SLIPPI_ONLINE, "remotePlayerCount: %d", remotePlayerCount);
 		for (int i = 0; i < remotePlayerCount; i++)
@@ -2387,8 +2434,12 @@ void CEXISlippi::prepareOnlineMatchState()
 		// the values from here, which is probably not the cleanest thing since they're coming from the netplay class.
 		// Unfortunately, I think it might be required for the overwrite stuff to work correctly though, maybe on a
 		// tiebreak in ranked?
-		std::vector<SlippiPlayerSelections *> orderedSelections(remotePlayerCount + 1);
+		std::vector<SlippiPlayerSelections *> orderedSelections(remotePlayerCount + localPlayerCount);
 		orderedSelections[lps.playerIdx] = &lps;
+		if (hasSecondLocal && lps2.playerIdx < orderedSelections.size() && lps2.playerIdx != lps.playerIdx)
+		{
+			orderedSelections[lps2.playerIdx] = &lps2;
+		}
 		for (int i = 0; i < remotePlayerCount; i++)
 		{
 			orderedSelections[rps[i].playerIdx] = &rps[i];
@@ -2544,9 +2595,12 @@ void CEXISlippi::prepareOnlineMatchState()
 		// onlineMatchBlock[0x8] = remotePlayerCount >= 2 ? 1 : 0; // TODO: If we dont set it to teams, it crashes
 		// sometimes
 
-		// Set p3/p4 player type to human or none depending on the amount of players
-		onlineMatchBlock[0x61 + 2 * 0x24] = remotePlayerCount >= 2 ? 0 : 3;
-		onlineMatchBlock[0x61 + 3 * 0x24] = remotePlayerCount >= 3 ? 0 : 3;
+		// Set p3/p4 player type to human or none depending on the amount of players.
+		// Count local players too so a couch client (2 locals) gets the same result
+		// as its remote peers
+		u8 totalPlayerCount = remotePlayerCount + localPlayerCount;
+		onlineMatchBlock[0x61 + 2 * 0x24] = totalPlayerCount >= 3 ? 0 : 3;
+		onlineMatchBlock[0x61 + 3 * 0x24] = totalPlayerCount >= 4 ? 0 : 3;
 
 		u16 *stage = (u16 *)&onlineMatchBlock[0xE];
 		*stage = Common::swap16(stageId);
@@ -2736,6 +2790,18 @@ void CEXISlippi::prepareOnlineMatchState()
 
 	// Add alt stage mode to output
 	m_read_queue.push_back(static_cast<u8>(alt_stage_mode));
+
+	// Couch co-op (MSRB v2) fields, appended at the END of the struct so that v1 ASM,
+	// which reads a shorter buffer, is completely unaffected. Both bytes are 0xFF when
+	// there is no second local player; consumers must treat 0xFF in either as "absent".
+	u8 inputSource2 = 0xFF;
+	int couchPort2 = SConfig::GetInstance().bSlippiCouchCoopPort2;
+	if (localPlayerIndex2 != 0xFF && couchPort2 >= 0 && couchPort2 <= 3)
+	{
+		inputSource2 = static_cast<u8>(couchPort2);
+	}
+	m_read_queue.push_back(inputSource2 != 0xFF ? localPlayerIndex2 : 0xFF); // MSRB_LOCAL_PLAYER_INDEX_2
+	m_read_queue.push_back(inputSource2);                                    // MSRB_INPUT_SOURCE_2
 }
 
 u16 CEXISlippi::getRandomStage()
@@ -2758,8 +2824,21 @@ u16 CEXISlippi::getRandomStage()
 	return selectedStage;
 }
 
-void CEXISlippi::setMatchSelections(u8 *payload)
+void CEXISlippi::setMatchSelections(u8 *payload, u32 payloadLen)
 {
+	// A v2 (couch co-op) buffer carries the local slot in a trailing PSTB_LOCAL_SLOT byte.
+	// v1-sized buffers are always slot 0, which keeps single-local behavior untouched
+	u8 localSlot = 0;
+	if (payloadLen >= MATCH_SELECTIONS_V2_PAYLOAD_SIZE)
+	{
+		localSlot = payload[9];
+	}
+	if (localSlot >= 2)
+	{
+		ERROR_LOG(SLIPPI_ONLINE, "Received match selections with invalid local slot %d", localSlot);
+		localSlot = 0;
+	}
+
 	SlippiPlayerSelections s;
 
 	s.teamId = payload[0];
@@ -2784,11 +2863,11 @@ void CEXISlippi::setMatchSelections(u8 *payload)
 	s.rngOffset = generator() % 0xFFFF;
 
 	// Merge these selections
-	localSelections.Merge(s);
+	localSelections[localSlot].Merge(s);
 
 	if (slippi_netplay)
 	{
-		slippi_netplay->SetMatchSelections(localSelections);
+		slippi_netplay->SetMatchSelections(localSelections[localSlot], localSlot);
 	}
 }
 
@@ -3070,7 +3149,8 @@ void CEXISlippi::handleConnectionCleanup()
 	slippi_netplay = nullptr;
 
 	// Clear character selections
-	localSelections.Reset();
+	for (auto &selections : localSelections)
+		selections.Reset();
 
 	// Reset random stage pool
 	stagePool.clear();
@@ -3429,6 +3509,21 @@ void CEXISlippi::DMAWrite(u32 _uAddr, u32 _uSize)
 		}
 
 		u32 payloadLen = payloadSizes[byte];
+
+		// Couch co-op v2 payloads are detected by SIZE only: when the remaining bytes of the
+		// transfer match the v2 size exactly, the game appended the optional trailing fields.
+		// v2 commands must therefore be the last command of their DMA transfer (v1 ASM sends
+		// v1-sized payloads and is parsed exactly as before — no breaking change)
+		u32 remainingLen = _uSize - bufLoc - 1;
+		if (byte == CMD_ONLINE_INPUTS && remainingLen == ONLINE_INPUTS_V2_PAYLOAD_SIZE)
+		{
+			payloadLen = ONLINE_INPUTS_V2_PAYLOAD_SIZE;
+		}
+		else if (byte == CMD_SET_MATCH_SELECTIONS && remainingLen == MATCH_SELECTIONS_V2_PAYLOAD_SIZE)
+		{
+			payloadLen = MATCH_SELECTIONS_V2_PAYLOAD_SIZE;
+		}
+
 		switch (byte)
 		{
 		case CMD_RECEIVE_GAME_END:
@@ -3461,7 +3556,7 @@ void CEXISlippi::DMAWrite(u32 _uAddr, u32 _uSize)
 			m_read_queue.insert(m_read_queue.begin(), geckoList.begin(), geckoList.end());
 			break;
 		case CMD_ONLINE_INPUTS:
-			handleOnlineInputs(&memPtr[bufLoc + 1]);
+			handleOnlineInputs(&memPtr[bufLoc + 1], payloadLen);
 			break;
 		case CMD_CAPTURE_SAVESTATE:
 			handleCaptureSavestate(&memPtr[bufLoc + 1]);
@@ -3476,7 +3571,7 @@ void CEXISlippi::DMAWrite(u32 _uAddr, u32 _uSize)
 			startFindMatch(&memPtr[bufLoc + 1]);
 			break;
 		case CMD_SET_MATCH_SELECTIONS:
-			setMatchSelections(&memPtr[bufLoc + 1]);
+			setMatchSelections(&memPtr[bufLoc + 1], payloadLen);
 			break;
 		case CMD_FILE_LENGTH:
 			prepareFileLength(&memPtr[bufLoc + 1]);

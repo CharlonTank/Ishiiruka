@@ -281,6 +281,8 @@ void SConfig::SaveCoreSettings(IniFile &ini)
 	core->Set("ReduceTimingDispersion", bReduceTimingDispersion);
 	core->Set("SlippiJukeboxEnabled", bSlippiJukeboxEnabled);
 	core->Set("SlippiJukeboxVolume", iSlippiJukeboxVolume);
+	core->Set("SlippiCouchCoopPort2", bSlippiCouchCoopPort2);
+	core->Set("SlippiCouchCoopGuestName", m_slippiCouchCoopGuestName);
 	core->Set("SlippiOnlineDelay", m_slippiOnlineDelay);
 	core->Set("SlippiEnableSpectator", m_enableSpectator);
 	core->Set("SlippiSpectatorLocalPort", m_spectator_local_port);
@@ -628,6 +630,8 @@ void SConfig::LoadCoreSettings(IniFile &ini)
 	core->Get("ReduceTimingDispersion", &bReduceTimingDispersion, false);
 	core->Get("SlippiJukeboxEnabled", &bSlippiJukeboxEnabled, false);
 	core->Get("SlippiJukeboxVolume", &iSlippiJukeboxVolume, 100);
+	core->Get("SlippiCouchCoopPort2", &bSlippiCouchCoopPort2, -1);
+	core->Get("SlippiCouchCoopGuestName", &m_slippiCouchCoopGuestName, "Player 2");
 	core->Get("SlippiEnableSpectator", &m_enableSpectator, true);
 	core->Get("SlippiSpectatorLocalPort", &m_spectator_local_port, 51441);
 	core->Get("SlippiOnlineDelay", &m_slippiOnlineDelay, 2);

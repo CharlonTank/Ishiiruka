@@ -1301,6 +1301,15 @@ void SlippiNetplayClient::SendSlippiPad(std::unique_ptr<SlippiPad> pad, u8 strea
 			minAckFrame = lastFrameAcked[i];
 	}
 
+	// Pad acks carry the acker's port but not which of OUR local streams they were earned
+	// by. With several local streams (couch co-op), an ack triggered by one stream's packet
+	// could otherwise drop pads the peer still needs from the other stream, so retain an
+	// extra safety window on every stream. No-op for regular single-local clients
+	if (m_localPlayerIdxs.size() > 1 && minAckFrame != INT_MAX)
+	{
+		minAckFrame -= 2 * ROLLBACK_MAX_FRAMES;
+	}
+
 	// Cap how far behind minAckFrame is allowed to fall. This protects against a peer
 	// that stops acking. The value used should be sensibly large enough to prevent
 	// any issues
@@ -1369,15 +1378,28 @@ void SlippiNetplayClient::SendSlippiPad(std::unique_ptr<SlippiPad> pad, u8 strea
 	}
 }
 
-void SlippiNetplayClient::SetMatchSelections(SlippiPlayerSelections &s)
+void SlippiNetplayClient::SetMatchSelections(SlippiPlayerSelections &s, u8 localSlot)
 {
-	matchInfo.localPlayerSelections.Merge(s);
-	matchInfo.localPlayerSelections.playerIdx = LocalPlayerPort();
+	// Slot 0 keeps the historical behavior in every case (including the dummy client used
+	// for local testing, whose local index list is empty); other slots are only serviced
+	// when this client actually hosts them (couch co-op)
+	if (localSlot > 0 && localSlot >= m_localPlayerIdxs.size())
+	{
+		ERROR_LOG(SLIPPI_ONLINE, "Dropping match selections for unhosted local slot %d", localSlot);
+		return;
+	}
+
+	// Slot 0 is the primary local player (the only one outside of couch co-op),
+	// slot 1 is the second local player of a couch client
+	auto &localSelections = localSlot == 1 ? matchInfo.localPlayerSelections2 : matchInfo.localPlayerSelections;
+
+	localSelections.Merge(s);
+	localSelections.playerIdx = localSlot == 0 ? LocalPlayerPort() : m_localPlayerIdxs[localSlot];
 
 	// Send packet containing selections
 	auto spac = std::make_unique<sf::Packet>();
-	INFO_LOG(SLIPPI_ONLINE, "Setting match selections for %d", LocalPlayerPort());
-	writeToPacket(*spac, matchInfo.localPlayerSelections);
+	INFO_LOG(SLIPPI_ONLINE, "Setting match selections for %d (local slot %d)", localSelections.playerIdx, localSlot);
+	writeToPacket(*spac, localSelections);
 	SendAsync(std::move(spac));
 }
 

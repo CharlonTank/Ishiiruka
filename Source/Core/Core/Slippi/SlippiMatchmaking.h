@@ -86,6 +86,8 @@ class SlippiMatchmaking
 	std::unique_ptr<SlippiNetplayClient> GetNetplayClient();
 	std::string GetErrorMessage();
 	int LocalPlayerIndex();
+	// All local player indices, ascending. Size 1 except for couch co-op clients
+	std::vector<int> GetLocalPlayerIndices();
 	std::vector<SlippiUser::UserInfo> GetPlayerInfo();
 	std::string GetPlayerName(u8 port);
 	SlippiRank GetPlayerRank(u8 port);

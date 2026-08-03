@@ -141,11 +141,15 @@ class SlippiMatchInfo
 {
   public:
 	SlippiPlayerSelections localPlayerSelections;
+	// Selections of the second local player when this client is a couch co-op client
+	// (two local players on one connection). Unused otherwise
+	SlippiPlayerSelections localPlayerSelections2;
 	SlippiPlayerSelections remotePlayerSelections[SLIPPI_REMOTE_PLAYER_MAX];
 
 	void Reset()
 	{
 		localPlayerSelections.Reset();
+		localPlayerSelections2.Reset();
 		for (int i = 0; i < SLIPPI_REMOTE_PLAYER_MAX; i++)
 		{
 			remotePlayerSelections[i].Reset();
@@ -193,7 +197,9 @@ class SlippiNetplayClient
 	void StartSlippiGame();
 	void SendConnectionSelected();
 	void SendSlippiPad(std::unique_ptr<SlippiPad> pad, u8 streamIdx = 0);
-	void SetMatchSelections(SlippiPlayerSelections &s);
+	// localSlot picks which local player the selections belong to: 0 (default, the only
+	// slot outside of couch co-op) or 1 for the second local player of a couch client
+	void SetMatchSelections(SlippiPlayerSelections &s, u8 localSlot = 0);
 	void SendGamePrepStep(SlippiGamePrepStepResults &s);
 	void SendSyncedGameState(SlippiSyncedGameState &s);
 	bool GetGamePrepResults(u8 stepIdx, SlippiGamePrepStepResults &res);

@@ -23,6 +23,18 @@
 #define MAX_MESSAGE_LENGTH 25
 #define CONNECT_CODE_LENGTH 8
 
+// CMD_ONLINE_INPUTS payload sizes. v1 carries one local pad, v2 (couch co-op) appends a
+// second 12-byte pad for the second local player. The version is detected from the size
+// of the payload received from the game so that v1 ASM keeps working unchanged.
+#define ONLINE_INPUTS_V1_PAYLOAD_SIZE 25
+#define ONLINE_INPUTS_V2_PAYLOAD_SIZE 37
+
+// CMD_SET_MATCH_SELECTIONS payload sizes. v2 (couch co-op) appends a trailing
+// PSTB_LOCAL_SLOT byte selecting which local player the selections belong to (0 or 1).
+// A v1-sized payload is always treated as local slot 0.
+#define MATCH_SELECTIONS_V1_PAYLOAD_SIZE 9
+#define MATCH_SELECTIONS_V2_PAYLOAD_SIZE 10
+
 extern bool g_needInputForFrame;
 
 // Emulated Slippi device used to receive and respond to in-game messages
@@ -158,13 +170,15 @@ class CEXISlippi : public IEXIDevice
 	    {CMD_IS_FILE_READY, 0},
 	    {CMD_GET_GECKO_CODES, 0},
 
-	    // The following are used for Slippi online and also have fixed sizes
-	    {CMD_ONLINE_INPUTS, 25},
+	    // The following are used for Slippi online and also have fixed sizes.
+	    // CMD_ONLINE_INPUTS and CMD_SET_MATCH_SELECTIONS list their v1 sizes; the couch
+	    // co-op v2 sizes are sniffed from the actual DMA transfer size in DMAWrite
+	    {CMD_ONLINE_INPUTS, ONLINE_INPUTS_V1_PAYLOAD_SIZE},
 	    {CMD_CAPTURE_SAVESTATE, 32},
 	    {CMD_LOAD_SAVESTATE, 32},
 	    {CMD_GET_MATCH_STATE, 0},
 	    {CMD_FIND_OPPONENT, 19},
-	    {CMD_SET_MATCH_SELECTIONS, 9},
+	    {CMD_SET_MATCH_SELECTIONS, MATCH_SELECTIONS_V1_PAYLOAD_SIZE},
 	    {CMD_SEND_CHAT_MESSAGE, 2},
 	    {CMD_OPEN_LOGIN, 0},
 	    {CMD_LOGOUT, 0},
@@ -239,15 +253,15 @@ class CEXISlippi : public IEXIDevice
 	u16 getRandomStage();
 	bool isDisconnected();
 	bool isSlippiChatEnabled();
-	void handleOnlineInputs(u8 *payload);
+	void handleOnlineInputs(u8 *payload, u32 payloadLen);
 	void prepareOpponentInputs(s32 frame, bool shouldSkip);
-	void handleSendInputs(s32 frame, u8 delay, s32 checksumFrame, u32 checksum, u8 *inputs);
+	void handleSendInputs(s32 frame, u8 delay, s32 checksumFrame, u32 checksum, u8 *inputs, u8 *inputs2);
 	void handleCaptureSavestate(u8 *payload);
 	void handleLoadSavestate(u8 *payload);
 	void handleNameEntryLoad(u8 *payload);
 	void startFindMatch(u8 *payload);
 	void prepareOnlineMatchState();
-	void setMatchSelections(u8 *payload);
+	void setMatchSelections(u8 *payload, u32 payloadLen);
 	bool shouldSkipOnlineFrame(s32 frame, s32 finalizedFrame);
 	void handlePoorMatchPerformance(s32 frame);
 	bool shouldAdvanceOnlineFrame(s32 frame);
@@ -343,11 +357,17 @@ class CEXISlippi : public IEXIDevice
 	u8 localPlayerIndex = 0;
 	u8 remotePlayerIndex = 1;
 
+	// Global player index of the second local player when couch co-op is active,
+	// 0xFF when this client hosts a single player (the default)
+	u8 localPlayerIndex2 = 0xFF;
+
   protected:
 	void TransferByte(u8 &byte) override;
 
   private:
-	SlippiPlayerSelections localSelections;
+	// Selections of the local players. Slot 0 is the primary local player (the only one
+	// outside of couch co-op), slot 1 is the second local player of a couch client
+	SlippiPlayerSelections localSelections[2];
 
 	std::unique_ptr<SlippiUser> user;
 	std::unique_ptr<SlippiGameFileLoader> gameFileLoader;

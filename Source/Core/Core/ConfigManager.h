@@ -155,6 +155,13 @@ struct SConfig : NonCopyable
 	bool bSlippiJukeboxEnabled = false;
 	int iSlippiJukeboxVolume = 100;
 
+	// Couch co-op: physical GC controller port (0-3) used by the second local player,
+	// -1 = couch co-op disabled. Configurable via Dolphin.ini ([Core] SlippiCouchCoopPort2)
+	int bSlippiCouchCoopPort2 = -1;
+	// Display name sent to the matchmaking server for the second local player when no
+	// user2.json exists next to user.json (guest seat, accepted in freeplay only)
+	std::string m_slippiCouchCoopGuestName = "Player 2";
+
 	MeleeLagReductionCode iLagReductionCode = MELEE_LAG_REDUCTION_CODE_UNSET;
 	bool bHasShownLagReductionWarning = false;
 	bool bMeleeForceWidescreen = false;
