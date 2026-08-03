@@ -3138,6 +3138,12 @@ void CEXISlippi::handleReportGame(const SlippiExiTypes::ReportGameQuery &query)
 		u8 colorId = query.gameInfoBlock[0x63 + 0x24 * i];
 		int startingStocks = query.gameInfoBlock[0x62 + 0x24 * i];
 		int startingPercent = Common::FromBigEndian(*(u16 *)&query.gameInfoBlock[0x70 + 0x24 * i]);
+		// Team assignment (written by the CSS): 0/1/2 in team modes. Lets the
+		// server settle ranked doubles without guessing from costume colors.
+		s8 teamId = lastSearch.mode == SlippiMatchmaking::OnlinePlayMode::TEAMS ||
+		                    lastSearch.mode == SlippiMatchmaking::OnlinePlayMode::PARTY
+		                ? (s8)query.gameInfoBlock[0x69 + 0x24 * i]
+		                : (s8)-1;
 
 		ERROR_LOG(SLIPPI_ONLINE,
 		          "UID: %s, Port Type: %d, Stocks: %d, DamageDone: %f, CharId: %d, ColorId: %d, StartStocks: %d, "
@@ -3145,7 +3151,7 @@ void CEXISlippi::handleReportGame(const SlippiExiTypes::ReportGameQuery &query)
 		          uid.c_str(), slotType, stocksRemaining, damageDone, charId, colorId, startingStocks, startingPercent);
 
 		uintptr_t playerReport = slprs_player_report_create(uid.c_str(), slotType, damageDone, stocksRemaining, charId,
-		                                                    colorId, startingStocks, startingPercent);
+		                                                    colorId, startingStocks, startingPercent, teamId);
 
 		slprs_game_report_add_player_report(gameReport, playerReport);
 	}
