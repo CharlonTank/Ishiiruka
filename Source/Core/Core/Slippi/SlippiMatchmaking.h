@@ -122,7 +122,13 @@ class SlippiMatchmaking
 
 	int m_hostPort;
 	int m_localPlayerIndex;
+	// All local player indices, ascending. Size 1 except for couch co-op clients where one
+	// client hosts multiple players. m_localPlayerIndex mirrors the first entry for compat
+	std::vector<int> m_localPlayerIndices;
 	std::vector<std::string> m_remoteIps;
+	// Global player indices served by each connection, parallel to m_remoteIps. A couch peer
+	// appears once in m_remoteIps but serves multiple player indices
+	std::vector<std::vector<u8>> m_remotePlayerIdxsByConn;
 	MatchmakeResult m_mmResult;
 	std::vector<SlippiUser::UserInfo> m_playerInfo;
 	std::vector<u16> m_allowedStages;

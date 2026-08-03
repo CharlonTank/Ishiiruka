@@ -159,8 +159,9 @@ class SlippiNetplayClient
 	void SendAsync(std::unique_ptr<sf::Packet> packet);
 
 	SlippiNetplayClient(bool isDecider); // Make a dummy client
-	SlippiNetplayClient(std::vector<std::string> addrs, std::vector<u16> ports, const u8 remotePlayerCount,
-	                    const u16 localPort, bool isDecider, u8 playerIdx);
+	SlippiNetplayClient(std::vector<std::string> addrs, std::vector<u16> ports,
+	                    std::vector<std::vector<u8>> remotePlayerIdxsByConn, const u8 remotePlayerCount,
+	                    const u16 localPort, bool isDecider, std::vector<u8> localPlayerIdxs);
 	~SlippiNetplayClient();
 
 	// Slippi Online
@@ -189,7 +190,7 @@ class SlippiNetplayClient
 	std::vector<int> GetFailedConnections();
 	void StartSlippiGame();
 	void SendConnectionSelected();
-	void SendSlippiPad(std::unique_ptr<SlippiPad> pad);
+	void SendSlippiPad(std::unique_ptr<SlippiPad> pad, u8 streamIdx = 0);
 	void SetMatchSelections(SlippiPlayerSelections &s);
 	void SendGamePrepStep(SlippiGamePrepStepResults &s);
 	void SendSyncedGameState(SlippiSyncedGameState &s);
@@ -231,6 +232,9 @@ class SlippiNetplayClient
 	std::vector<ENetPeer *> m_server;
 	std::thread m_thread;
 	u8 m_remotePlayerCount = 0;
+	// Global player indices served by each connection, parallel to m_server. There can be fewer
+	// connections than remote players when a couch peer hosts several players on one connection
+	std::vector<std::vector<u8>> m_remotePlayerIdxsByConn;
 
 	std::string m_selected_game;
 	Common::Flag m_is_running{false};
@@ -257,11 +261,15 @@ class SlippiNetplayClient
 	bool isConnectionSelected = false;
 	bool isDecider = false;
 	bool hasGameStarted = false;
-	u8 playerIdx = 0;
+	// Global indices of the players hosted by this client, ascending. Size 1 except for couch
+	// co-op clients. Entry 0 is the primary local player, used wherever a single index is needed
+	std::vector<u8> m_localPlayerIdxs;
 
 	struct ActiveConnectionInfo
 	{
-		u8 playerIdx;
+		// All global player indices served by this connection (a couch peer serves several).
+		// Liveness is all-or-nothing: when the connection dies, every player on it drops
+		std::vector<u8> playerIdxs;
 		bool isDisconnected = false;
 	};
 
@@ -277,7 +285,8 @@ class SlippiNetplayClient
 	// per-peer ENet disconnects for players force-dropped from the EXI side.
 	std::atomic<bool> playerActive[SLIPPI_PLAYER_COUNT_MAX] = {};
 
-	std::deque<std::unique_ptr<SlippiPad>> localPadQueue; // most recent inputs at start of deque
+	// One queue per local player stream, parallel to m_localPlayerIdxs
+	std::vector<std::deque<std::unique_ptr<SlippiPad>>> localPadQueues; // most recent inputs at start of deque
 	std::deque<std::unique_ptr<SlippiPad>>
 	    remotePadQueue[SLIPPI_REMOTE_PLAYER_MAX]; // most recent inputs at start of deque
 

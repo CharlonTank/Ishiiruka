@@ -3,6 +3,7 @@
 #include "Common/ENetUtil.h"
 #include "Common/Logging/Log.h"
 #include "Common/StringUtil.h"
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -523,7 +524,9 @@ void SlippiMatchmaking::handleMatchmaking()
 
 	// Clear old users
 	m_remoteIps.clear();
+	m_remotePlayerIdxsByConn.clear();
 	m_playerInfo.clear();
+	m_localPlayerIndices.clear();
 
 	std::string matchId = getResp.value("matchId", "");
 	WARN_LOG(SLIPPI_ONLINE, "Match ID: %s", matchId.c_str());
@@ -575,16 +578,23 @@ void SlippiMatchmaking::handleMatchmaking()
 				std::vector<std::string> localIpParts;
 				SplitString(el.value("ipAddress", "1.1.1.1:123"), ':', localIpParts);
 				localExternalIp = localIpParts[0];
-				m_localPlayerIndex = playerInfo.port - 1;
+				m_localPlayerIndices.push_back(playerInfo.port - 1);
 			}
 		};
+
+		// Keep m_localPlayerIndex pointing at the first local player for backward compat
+		std::sort(m_localPlayerIndices.begin(), m_localPlayerIndices.end());
+		if (!m_localPlayerIndices.empty())
+			m_localPlayerIndex = m_localPlayerIndices[0];
 
 		// Loop a second time to get the correct remote IPs
 		for (json::iterator it = queue.begin(); it != queue.end(); ++it)
 		{
 			json el = *it;
 
-			if (el.value("port", 0) - 1 == m_localPlayerIndex)
+			int elPlayerIdx = el.value("port", 0) - 1;
+			if (std::find(m_localPlayerIndices.begin(), m_localPlayerIndices.end(), elPlayerIdx) !=
+			    m_localPlayerIndices.end())
 				continue;
 
 			auto extIp = el.value("ipAddress", "1.1.1.1:123");
@@ -595,17 +605,29 @@ void SlippiMatchmaking::handleMatchmaking()
 
 			WARN_LOG(SLIPPI_ONLINE, "LAN IP: %s", lanIp.c_str());
 
-			if (exIpParts[0] != localExternalIp || lanIp.empty())
-			{
-				// If external IPs are different, just use that address
-				m_remoteIps.push_back(extIp);
-				continue;
-			}
-
 			// TODO: Instead of using one or the other, it might be better to try both
 
+			// If external IPs are different, just use that address.
 			// If external IPs are the same, try using LAN IPs
-			m_remoteIps.push_back(lanIp);
+			std::string connectIp = (exIpParts[0] != localExternalIp || lanIp.empty()) ? extIp : lanIp;
+
+			// Dedupe by ip:port. A couch peer lists one entry per player it hosts but only has
+			// one client to connect to; track every player index served by each connection
+			bool isKnownConn = false;
+			for (int i = 0; i < m_remoteIps.size(); i++)
+			{
+				if (m_remoteIps[i] == connectIp)
+				{
+					m_remotePlayerIdxsByConn[i].push_back((u8)elPlayerIdx);
+					isKnownConn = true;
+					break;
+				}
+			}
+			if (!isKnownConn)
+			{
+				m_remoteIps.push_back(connectIp);
+				m_remotePlayerIdxsByConn.push_back(std::vector<u8>{(u8)elPlayerIdx});
+			}
 		}
 	}
 	m_isHost = getResp.value("isHost", false);
@@ -810,7 +832,9 @@ u8 SlippiMatchmaking::RemotePlayerCount()
 	if (m_playerInfo.size() == 0)
 		return 0;
 
-	return (u8)m_playerInfo.size() - 1;
+	// Assume a single local player if the server response didn't flag any (legacy behavior)
+	size_t localPlayerCount = m_localPlayerIndices.empty() ? 1 : m_localPlayerIndices.size();
+	return (u8)(m_playerInfo.size() - localPlayerCount);
 }
 
 void SlippiMatchmaking::handleConnecting()
@@ -820,7 +844,7 @@ void SlippiMatchmaking::handleConnecting()
 	m_isSwapAttempt = false;
 	m_netplayClient = nullptr;
 
-	u8 remotePlayerCount = (u8)m_remoteIps.size();
+	u8 remotePlayerCount = RemotePlayerCount();
 	std::vector<std::string> remoteParts;
 	std::vector<std::string> addrs;
 	std::vector<u16> ports;
@@ -832,6 +856,14 @@ void SlippiMatchmaking::handleConnecting()
 		ports.push_back(std::stoi(remoteParts[1]));
 	}
 
+	std::vector<u8> localPlayerIdxs;
+	for (int i = 0; i < m_localPlayerIndices.size(); i++)
+	{
+		localPlayerIdxs.push_back((u8)m_localPlayerIndices[i]);
+	}
+	if (localPlayerIdxs.empty())
+		localPlayerIdxs.push_back((u8)m_localPlayerIndex);
+
 	std::stringstream ipLog;
 	ipLog << "Remote player IPs: ";
 	for (int i = 0; i < m_remoteIps.size(); i++)
@@ -841,8 +873,8 @@ void SlippiMatchmaking::handleConnecting()
 	// INFO_LOG(SLIPPI_ONLINE, "[Matchmaking] My port: %d || %s", m_hostPort, ipLog.str());
 
 	// Is host is now used to specify who the decider is
-	auto client = std::make_unique<SlippiNetplayClient>(addrs, ports, remotePlayerCount, m_hostPort, m_isHost,
-	                                                    m_localPlayerIndex);
+	auto client = std::make_unique<SlippiNetplayClient>(addrs, ports, m_remotePlayerIdxsByConn, remotePlayerCount,
+	                                                    m_hostPort, m_isHost, localPlayerIdxs);
 
 	while (!m_netplayClient)
 	{
@@ -871,16 +903,25 @@ void SlippiMatchmaking::handleConnecting()
 			{
 				std::stringstream err;
 				err << "Could not connect to players: ";
+				bool isFirstName = true;
 				for (int i = 0; i < failedConns.size(); i++)
 				{
-					int p = failedConns[i];
-					if (p >= m_localPlayerIndex)
-						p++;
+					int connIdx = failedConns[i];
+					if (connIdx >= m_remotePlayerIdxsByConn.size())
+						continue;
 
-					err << m_playerInfo[p].displayName;
-					if (i < failedConns.size() - 1)
+					// A failed couch connection means every player it serves is unreachable
+					for (auto p : m_remotePlayerIdxsByConn[connIdx])
 					{
-						err << ", ";
+						if (p >= m_playerInfo.size())
+							continue;
+
+						if (!isFirstName)
+						{
+							err << ", ";
+						}
+						err << m_playerInfo[p].displayName;
+						isFirstName = false;
 					}
 				}
 				m_errorMsg = err.str();
