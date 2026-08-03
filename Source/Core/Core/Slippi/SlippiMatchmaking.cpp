@@ -437,10 +437,18 @@ void SlippiMatchmaking::startMatchmaking()
 	request["appVersion"] = scm_slippi_semver_str;
 	request["ipAddressLan"] = lanAddr;
 
-	// Couch co-op: declare a second local player on this ticket. When a user2.json file
-	// exists next to user.json, the second seat queues as that account; otherwise the
-	// second player joins as a guest (only accepted by the server in freeplay modes)
-	if (SConfig::GetInstance().bSlippiCouchCoopPort2 >= 0)
+	// Couch co-op: declare a second local player on this ticket. Only the 4-player
+	// modes (TEAMS/PARTY) support couch seats: the server assembles those through
+	// find_teams, which gates every member on a couch-capable app version. The 1v1
+	// modes (RANKED/UNRANKED/DIRECT) are paired by find_one, which has no notion of
+	// multi-local tickets — declaring 2 seats there would build a broken 3-player
+	// lobby, possibly with a pre-3.7 peer that cannot handle multi-local endpoints.
+	// When a user2.json file exists next to user.json, the second seat queues as
+	// that account; otherwise the second player joins as a guest (only accepted by
+	// the server in freeplay modes)
+	bool isCouchCapableMode = m_searchSettings.mode == OnlinePlayMode::TEAMS ||
+	                          m_searchSettings.mode == OnlinePlayMode::PARTY;
+	if (SConfig::GetInstance().bSlippiCouchCoopPort2 >= 0 && isCouchCapableMode)
 	{
 		request["localPlayerCount"] = 2;
 
