@@ -2267,6 +2267,14 @@ void CEXISlippi::prepareOnlineMatchState()
 				localPlayerIndex = isDecider ? 0 : 1;
 				remotePlayerIndex = isDecider ? 1 : 0;
 			}
+			else if (remotePlayerCount >= 1)
+			{
+				// The member default (1) is only correct for the forced 1v1 shape above. In
+				// every other shape — including couch (2 locals) vs 1 remote, where index 1
+				// is a LOCAL player — publish the actual first remote index so MSRB 0x004
+				// and chat attribution never point at a local player
+				remotePlayerIndex = matchInfo->remotePlayerSelections[0].playerIdx;
+			}
 #endif
 		}
 		else
@@ -2289,6 +2297,8 @@ void CEXISlippi::prepareOnlineMatchState()
 	else
 	{
 		slippi_netplay = nullptr;
+		// No live connection — never keep advertising a stale second local seat
+		localPlayerIndex2 = 0xFF;
 	}
 
 	u32 rngOffset = 0;
@@ -2342,7 +2352,9 @@ void CEXISlippi::prepareOnlineMatchState()
 	// Set chat message if any
 	if (slippi_netplay)
 	{
-		auto isSingleMode = matchmaking && matchmaking->RemotePlayerCount() == 1;
+		// True 1v1 only: a couch client (2 locals) vs a single remote is NOT single
+		// mode — the 1v1 chat attribution below would blame a local player
+		auto isSingleMode = matchmaking && matchmaking->RemotePlayerCount() == 1 && localPlayerIndex2 == 0xFF;
 		bool isChatEnabled = isSlippiChatEnabled();
 		sentChatMessageId = slippi_netplay->GetSlippiRemoteSentChatMessage(isChatEnabled);
 
@@ -2434,21 +2446,34 @@ void CEXISlippi::prepareOnlineMatchState()
 		// the values from here, which is probably not the cleanest thing since they're coming from the netplay class.
 		// Unfortunately, I think it might be required for the overwrite stuff to work correctly though, maybe on a
 		// tiebreak in ranked?
-		std::vector<SlippiPlayerSelections *> orderedSelections(remotePlayerCount + localPlayerCount);
-		orderedSelections[lps.playerIdx] = &lps;
+		// Indexed by GLOBAL player index, so size it to the max player count (server
+		// assigned ports are not guaranteed to be contiguous) and keep every access
+		// null-tolerant: a slot stays null when a player's announced index is out of
+		// range, duplicated, or simply never announced. Dereferencing blindly here
+		// crashed the EXI thread (nullptr in the teamId/isStageSelected loops).
+		std::vector<SlippiPlayerSelections *> orderedSelections(SLIPPI_PLAYER_COUNT_MAX);
+		if (lps.playerIdx < orderedSelections.size())
+		{
+			orderedSelections[lps.playerIdx] = &lps;
+		}
 		if (hasSecondLocal && lps2.playerIdx < orderedSelections.size() && lps2.playerIdx != lps.playerIdx)
 		{
 			orderedSelections[lps2.playerIdx] = &lps2;
 		}
 		for (int i = 0; i < remotePlayerCount; i++)
 		{
-			orderedSelections[rps[i].playerIdx] = &rps[i];
+			if (rps[i].playerIdx < orderedSelections.size())
+			{
+				orderedSelections[rps[i].playerIdx] = &rps[i];
+			}
 		}
 
 		// Overwrite selections
-		for (int i = 0; i < overwrite_selections.size(); i++)
+		for (int i = 0; i < overwrite_selections.size() && i < orderedSelections.size(); i++)
 		{
 			const auto &ow = overwrite_selections[i];
+			if (!orderedSelections[i])
+				continue;
 
 			orderedSelections[i]->characterId = ow.characterId;
 			orderedSelections[i]->characterColor = ow.characterColor;
@@ -2459,7 +2484,7 @@ void CEXISlippi::prepareOnlineMatchState()
 		u16 stageId = 0x1F; // Default to battlefield if there was no selection
 		for (const auto &selections : orderedSelections)
 		{
-			if (!selections->isStageSelected)
+			if (!selections || !selections->isStageSelected)
 				continue;
 
 			// Stage selected by this player, use that selection
@@ -2518,13 +2543,23 @@ void CEXISlippi::prepareOnlineMatchState()
 		rngOffset = isDecider ? lps.rngOffset : rps[0].rngOffset;
 		INFO_LOG(SLIPPI_ONLINE, "Rng Offset: 0x%x", rngOffset);
 
-		// Check if everyone is the same color
-		auto firstTeamId = orderedSelections[0]->teamId;
+		// Check if everyone is the same color. The first participating (non-null)
+		// entry defines the reference team — slot 0 can legitimately be empty
+		u8 firstTeamId = 0;
+		bool foundFirstTeamId = false;
 		bool areAllSameTeam = true;
 		for (const auto &s : orderedSelections)
 		{
+			if (!s)
+				continue;
 			// ERROR_LOG(SLIPPI_ONLINE, "[%d] First team: %d. Team: %d. LocalPlayer: %d", s->playerIdx, color,
 			// s->teamId, localPlayerIndex);
+			if (!foundFirstTeamId)
+			{
+				firstTeamId = s->teamId;
+				foundFirstTeamId = true;
+				continue;
+			}
 			if (s->teamId != firstTeamId)
 			{
 				areAllSameTeam = false;
@@ -2545,7 +2580,7 @@ void CEXISlippi::prepareOnlineMatchState()
 		// Overwrite player character choices
 		for (auto &s : orderedSelections)
 		{
-			if (!s->isCharacterSelected)
+			if (!s || !s->isCharacterSelected)
 			{
 				continue;
 			}
@@ -2792,16 +2827,24 @@ void CEXISlippi::prepareOnlineMatchState()
 	m_read_queue.push_back(static_cast<u8>(alt_stage_mode));
 
 	// Couch co-op (MSRB v2) fields, appended at the END of the struct so that v1 ASM,
-	// which reads a shorter buffer, is completely unaffected. Both bytes are 0xFF when
-	// there is no second local player; consumers must treat 0xFF in either as "absent".
-	u8 inputSource2 = 0xFF;
+	// which reads a shorter buffer, is completely unaffected.
+	// Wire encoding is value + 1, with 0 = "absent" (couch-exi-v2.md §3): DMARead
+	// zero-fills any bytes a v1 Dolphin doesn't serve, so 0x00 MUST decode as "no
+	// second local player" — with a plain 0xFF sentinel the zero-fill would decode
+	// as "second local player at index 0 fed by physical port 0", silently
+	// corrupting every online match on a mixed v2-ASM/v1-Dolphin install.
+	// Both bytes are published together or not at all; the ASM treats 0 (or any
+	// out-of-range value) in EITHER byte as absent.
+	u8 localPlayerIndex2Enc = 0; // 0 = absent
+	u8 inputSource2Enc = 0;      // 0 = absent
 	int couchPort2 = SConfig::GetInstance().bSlippiCouchCoopPort2;
 	if (localPlayerIndex2 != 0xFF && couchPort2 >= 0 && couchPort2 <= 3)
 	{
-		inputSource2 = static_cast<u8>(couchPort2);
+		localPlayerIndex2Enc = localPlayerIndex2 + 1;
+		inputSource2Enc = static_cast<u8>(couchPort2) + 1;
 	}
-	m_read_queue.push_back(inputSource2 != 0xFF ? localPlayerIndex2 : 0xFF); // MSRB_LOCAL_PLAYER_INDEX_2
-	m_read_queue.push_back(inputSource2);                                    // MSRB_INPUT_SOURCE_2
+	m_read_queue.push_back(localPlayerIndex2Enc); // MSRB_LOCAL_PLAYER_INDEX_2 (value+1, 0 = absent)
+	m_read_queue.push_back(inputSource2Enc);      // MSRB_INPUT_SOURCE_2 (value+1, 0 = absent)
 }
 
 u16 CEXISlippi::getRandomStage()
@@ -2862,7 +2905,9 @@ void CEXISlippi::setMatchSelections(u8 *payload, u32 payloadLen)
 
 	s.rngOffset = generator() % 0xFFFF;
 
-	// Merge these selections
+	// Merge these selections. Couch co-op: the CSS ASM sends one lock-in transfer
+	// per local slot (PSTB v2, couch-exi-v2.md §2) — slot 1 mirrors slot 0 per the
+	// étape 4 MVP — so both seats become ready through this same path.
 	localSelections[localSlot].Merge(s);
 
 	if (slippi_netplay)
@@ -3151,6 +3196,11 @@ void CEXISlippi::handleConnectionCleanup()
 	// Clear character selections
 	for (auto &selections : localSelections)
 		selections.Reset();
+
+	// A second local seat only exists while a couch connection is live. Without
+	// this reset the MSRB would keep publishing the stale index (re-arming the v2
+	// input path in the game) for solo sessions queued after a couch match
+	localPlayerIndex2 = 0xFF;
 
 	// Reset random stage pool
 	stagePool.clear();

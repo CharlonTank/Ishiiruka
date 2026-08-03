@@ -78,14 +78,34 @@ SlippiNetplayClient::SlippiNetplayClient(std::vector<std::string> addrs, std::ve
 	WARN_LOG(SLIPPI_ONLINE, "Initializing Slippi Netplay for port: %d, with host: %s, player idx: %d", localPort,
 	         isDecider ? "true" : "false", localPlayerIdxs.empty() ? 0 : localPlayerIdxs[0]);
 	this->isDecider = isDecider;
-	this->m_remotePlayerCount = remotePlayerCount;
+	// Per-remote-player arrays (remotePadQueue, ackTimers, ...) are fixed size —
+	// never accept a count past what they hold
+	this->m_remotePlayerCount = std::min<u8>(remotePlayerCount, SLIPPI_REMOTE_PLAYER_MAX);
 	this->m_localPlayerIdxs = localPlayerIdxs;
+	// Player indices index fixed-size arrays (playerActive is
+	// SLIPPI_PLAYER_COUNT_MAX entries) and ultimately come from the matchmaking
+	// server response; drop anything out of range so no server/MITM-controlled
+	// value can ever index past an array (validated at parse time too, this is
+	// defense in depth)
+	auto isIdxOutOfRange = [](u8 idx) { return idx >= SLIPPI_PLAYER_COUNT_MAX; };
+	this->m_localPlayerIdxs.erase(
+	    std::remove_if(this->m_localPlayerIdxs.begin(), this->m_localPlayerIdxs.end(), isIdxOutOfRange),
+	    this->m_localPlayerIdxs.end());
 	// The port <-> remote index mappings assume this list is ascending
 	std::sort(this->m_localPlayerIdxs.begin(), this->m_localPlayerIdxs.end());
 	// localPadQueues is a fixed array — never accept more seats than it holds.
 	if (this->m_localPlayerIdxs.size() > SLIPPI_LOCAL_PLAYER_MAX)
 		this->m_localPlayerIdxs.resize(SLIPPI_LOCAL_PLAYER_MAX);
 	this->m_remotePlayerIdxsByConn = remotePlayerIdxsByConn;
+	for (auto &connIdxs : this->m_remotePlayerIdxsByConn)
+	{
+		auto sizeBefore = connIdxs.size();
+		connIdxs.erase(std::remove_if(connIdxs.begin(), connIdxs.end(), isIdxOutOfRange), connIdxs.end());
+		if (connIdxs.size() != sizeBefore)
+		{
+			ERROR_LOG(SLIPPI_ONLINE, "Dropped out-of-range remote player index from connection mapping");
+		}
+	}
 
 	// Set up remote player data structures. Entries past m_remotePlayerCount are never read
 	int j = 0;
@@ -172,6 +192,11 @@ SlippiNetplayClient::SlippiNetplayClient(std::vector<std::string> addrs, std::ve
 SlippiNetplayClient::SlippiNetplayClient(bool isDecider)
 {
 	this->isDecider = isDecider;
+	// The dummy client (LOCAL_TESTING) still needs one local stream: SendSlippiPad
+	// guards on streamIdx < m_localPlayerIdxs.size() and would otherwise silently
+	// drop every pad, breaking the whole local test harness (fake pads, rollback
+	// determinism runs). Mirrors the old `playerIdx = 0` behavior.
+	this->m_localPlayerIdxs.push_back(0);
 	SLIPPI_NETPLAY = std::move(this);
 	slippiConnectStatus.store(SlippiConnectStatus::NET_CONNECT_STATUS_FAILED, std::memory_order_release);
 }
@@ -868,7 +893,8 @@ void SlippiNetplayClient::ThreadFunc()
 					}
 				}
 				ActiveConnectionInfo earlyConnInfo;
-				earlyConnInfo.playerIdxs = m_remotePlayerIdxsByConn[earlyConnRemoteIdx];
+				if (earlyConnRemoteIdx < (int)m_remotePlayerIdxsByConn.size())
+					earlyConnInfo.playerIdxs = m_remotePlayerIdxsByConn[earlyConnRemoteIdx];
 				activeConnections[keyStrm.str()][netEvent.peer] = earlyConnInfo;
 				for (auto connPlayerIdx : earlyConnInfo.playerIdxs)
 					playerActive[connPlayerIdx].store(true, std::memory_order_release);
@@ -1168,7 +1194,8 @@ void SlippiNetplayClient::ThreadFunc()
 					}
 				}
 				ActiveConnectionInfo lateConnInfo;
-				lateConnInfo.playerIdxs = m_remotePlayerIdxsByConn[lateConnRemoteIdx];
+				if (lateConnRemoteIdx < (int)m_remotePlayerIdxsByConn.size())
+					lateConnInfo.playerIdxs = m_remotePlayerIdxsByConn[lateConnRemoteIdx];
 				activeConnections[keyStrm.str()][netEvent.peer] = lateConnInfo;
 				for (auto connPlayerIdx : lateConnInfo.playerIdxs)
 					playerActive[connPlayerIdx].store(true, std::memory_order_release);

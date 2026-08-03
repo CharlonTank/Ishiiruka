@@ -615,16 +615,47 @@ void SlippiMatchmaking::handleMatchmaking()
 				std::vector<std::string> localIpParts;
 				SplitString(el.value("ipAddress", "1.1.1.1:123"), ':', localIpParts);
 				localExternalIp = localIpParts[0];
-				m_localPlayerIndices.push_back(playerInfo.port - 1);
+
+				// Ports come straight from the server response; a missing/zero `port`
+				// would yield index -1 → (u8)255 and index fixed-size arrays out of
+				// bounds downstream (playerActive & co). Never accept it.
+				int localPlayerIdx = playerInfo.port - 1;
+				if (localPlayerIdx < 0 || localPlayerIdx >= SLIPPI_PLAYER_COUNT_MAX)
+				{
+					ERROR_LOG(SLIPPI_ONLINE, "[Matchmaking] Local player entry has invalid port: %d", playerInfo.port);
+				}
+				else
+				{
+					m_localPlayerIndices.push_back(localPlayerIdx);
+				}
 			}
 		};
 
 		// Keep m_localPlayerIndex pointing at the first local player for backward compat
 		std::sort(m_localPlayerIndices.begin(), m_localPlayerIndices.end());
+		// The netplay client clamps its local list to SLIPPI_LOCAL_PLAYER_MAX but
+		// RemotePlayerCount() is derived from THIS list — if they disagree, every
+		// port <-> remote-index mapping diverges and the match desyncs from frame 1.
+		// A response with too many local seats is malformed: refuse it outright.
+		if (m_localPlayerIndices.size() > SLIPPI_LOCAL_PLAYER_MAX)
+		{
+			ERROR_LOG(SLIPPI_ONLINE, "[Matchmaking] Server declared %d local players, max supported is %d",
+			          (int)m_localPlayerIndices.size(), SLIPPI_LOCAL_PLAYER_MAX);
+			m_state = ProcessState::ERROR_ENCOUNTERED;
+			m_errorMsg = "Matchmaking returned an invalid match (too many local players)";
+			return;
+		}
 		if (!m_localPlayerIndices.empty())
 			m_localPlayerIndex = m_localPlayerIndices[0];
 
 		// Loop a second time to get the correct remote IPs
+
+		// One dedupe key per m_remoteIps entry, alive only while parsing this
+		// response. A key exists only when the server explicitly provided both
+		// addresses for the entry, so players that fell back to the placeholder
+		// literals can never be silently merged onto one connection.
+		std::vector<std::string> remoteConnDedupeKeys;
+
 		for (json::iterator it = queue.begin(); it != queue.end(); ++it)
 		{
 			json el = *it;
@@ -633,6 +664,17 @@ void SlippiMatchmaking::handleMatchmaking()
 			if (std::find(m_localPlayerIndices.begin(), m_localPlayerIndices.end(), elPlayerIdx) !=
 			    m_localPlayerIndices.end())
 				continue;
+
+			// Same rule as for local entries: an out-of-range index would corrupt the
+			// fixed-size per-player arrays (playerActive[(u8)-1] writes past the array
+			// on the netplay thread). Skip the entry — the resulting missing
+			// connection surfaces as a clean connect error instead
+			if (elPlayerIdx < 0 || elPlayerIdx >= SLIPPI_PLAYER_COUNT_MAX)
+			{
+				ERROR_LOG(SLIPPI_ONLINE, "[Matchmaking] Remote player entry has invalid port: %d",
+				          el.value("port", 0));
+				continue;
+			}
 
 			auto extIp = el.value("ipAddress", "1.1.1.1:123");
 			std::vector<std::string> exIpParts;
@@ -648,13 +690,31 @@ void SlippiMatchmaking::handleMatchmaking()
 			// If external IPs are the same, try using LAN IPs
 			std::string connectIp = (exIpParts[0] != localExternalIp || lanIp.empty()) ? extIp : lanIp;
 
-			// Dedupe by ip:port. A couch peer lists one entry per player it hosts but only has
-			// one client to connect to; track every player index served by each connection
+			// Dedupe couch peers: a couch peer lists one entry per player it hosts but
+			// only has one client to connect to; track every player index served by
+			// each connection. Merging is deliberately strict — it requires BOTH the
+			// external (ip:port) and LAN strings to be explicitly provided and
+			// identical, and at most SLIPPI_LOCAL_PLAYER_MAX players per connection.
+			// An accidental merge of two distinct peers (shared CGNAT, missing server
+			// fields) would under-provision connections and stall the match with no
+			// error, so when in doubt we keep one connection per player and let it
+			// fail loudly at connect time instead.
+			bool hasExplicitAddrs = el.value("ipAddress", "") != "" && el.value("ipAddressLan", "") != "";
+			std::string dedupeKey = extIp + "|" + lanIp;
 			bool isKnownConn = false;
-			for (int i = 0; i < m_remoteIps.size(); i++)
+			if (hasExplicitAddrs)
 			{
-				if (m_remoteIps[i] == connectIp)
+				for (int i = 0; i < (int)remoteConnDedupeKeys.size(); i++)
 				{
+					if (remoteConnDedupeKeys[i] != dedupeKey)
+						continue;
+					if (m_remotePlayerIdxsByConn[i].size() >= SLIPPI_LOCAL_PLAYER_MAX)
+					{
+						ERROR_LOG(SLIPPI_ONLINE,
+						          "[Matchmaking] More than %d players share address %s — not merging further",
+						          SLIPPI_LOCAL_PLAYER_MAX, connectIp.c_str());
+						break;
+					}
 					m_remotePlayerIdxsByConn[i].push_back((u8)elPlayerIdx);
 					isKnownConn = true;
 					break;
@@ -664,6 +724,7 @@ void SlippiMatchmaking::handleMatchmaking()
 			{
 				m_remoteIps.push_back(connectIp);
 				m_remotePlayerIdxsByConn.push_back(std::vector<u8>{(u8)elPlayerIdx});
+				remoteConnDedupeKeys.push_back(dedupeKey);
 			}
 		}
 	}
@@ -876,6 +937,11 @@ u8 SlippiMatchmaking::RemotePlayerCount()
 
 	// Assume a single local player if the server response didn't flag any (legacy behavior)
 	size_t localPlayerCount = m_localPlayerIndices.empty() ? 1 : m_localPlayerIndices.size();
+	// Saturate: if local entries somehow outnumber players (malformed/duplicated
+	// response), the subtraction would underflow size_t and the u8 cast would
+	// produce a huge count that indexes fixed-size arrays out of bounds downstream
+	if (localPlayerCount >= m_playerInfo.size())
+		return 0;
 	return (u8)(m_playerInfo.size() - localPlayerCount);
 }
 
