@@ -1284,7 +1284,7 @@ void CEXISlippi::handleOnlineInputs(u8 *payload, u32 payloadLen)
 		fallBehindCounter = 0;
 		fallFarBehindCounter = 0;
 
-		localSelections.Reset();
+		localSelections[0].Reset();
 	}
 
 	// During warmup, don't exchange inputs over network - return continue with dummy data
@@ -2387,10 +2387,10 @@ void CEXISlippi::prepareOnlineMatchState()
 		};
 
 		// Set P1 = local player's character (human, type 0)
-		warmupMatchBlock[0x60] = localSelections.characterId;
+		warmupMatchBlock[0x60] = localSelections[0].characterId;
 		warmupMatchBlock[0x61] = 0; // Human player type
 		warmupMatchBlock[0x62] = 4; // 4 stocks
-		warmupMatchBlock[0x63] = localSelections.characterColor;
+		warmupMatchBlock[0x63] = localSelections[0].characterColor;
 
 		// Set P2 = CPU Level 9 with random character
 		warmupMatchBlock[0x60 + 0x24] = warmupCpuCharId;
