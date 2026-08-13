@@ -104,6 +104,8 @@ class CEXISlippi : public IEXIDevice
 		CMD_REPORT_SET_COMPLETE = 0xC2,
 		CMD_GET_PLAYER_SETTINGS = 0xC3,
 		CMD_REPORT_MATCH_STATUS_UPDATE = 0xC4,
+		CMD_GET_WARMUP_STATE = 0xC5,
+		CMD_ACTIVATE_WARMUP = 0xC6,
 
 		// Misc
 		CMD_LOG_MESSAGE = 0xD0,
@@ -194,6 +196,8 @@ class CEXISlippi : public IEXIDevice
 	    {CMD_REPORT_SET_COMPLETE, static_cast<u32>(sizeof(SlippiExiTypes::ReportSetCompletionQuery) - 1)},
 	    {CMD_GET_PLAYER_SETTINGS, 0},
 	    {CMD_REPORT_MATCH_STATUS_UPDATE, static_cast<u32>(sizeof(SlippiExiTypes::ReportMatchStatusUpdateQuery) - 1)},
+	    {CMD_GET_WARMUP_STATE, 0},
+	    {CMD_ACTIVATE_WARMUP, 3},
 
 	    // Misc
 	    {CMD_LOG_MESSAGE, 0xFFFF}, // Variable size... will only work if by itself
@@ -272,6 +276,8 @@ class CEXISlippi : public IEXIDevice
 	void prepareOnlineStatus();
 	void handleConnectionCleanup();
 	void prepareNewSeed();
+	void prepareWarmupState();
+	void handleActivateWarmup(u8 *payload);
 	void handleReportGame(const SlippiExiTypes::ReportGameQuery &query);
 	void handleOverwriteSelections(const SlippiExiTypes::OverwriteSelectionsQuery &query);
 	void handleGamePrepStepComplete(const SlippiExiTypes::GpCompleteStepQuery &query);
@@ -351,6 +357,15 @@ class CEXISlippi : public IEXIDevice
 
 	// Used to determine when to detect when a new session has started
 	bool isPlaySessionActive = false;
+
+	bool isWarmupActive = false;
+	u8 warmupCpuCharId = 2; // Fox
+	u8 warmupCpuLevel = 9;
+	u8 warmupStageIdx = 2; // Yoshi's Story
+	bool warmupOpponentFound = false;
+	bool warmupMatchBlockReady = false;
+	bool shouldRestartSearchAfterWarmup = false;
+	std::vector<u8> cachedWarmupResponse;
 
 	// We put these at the class level to preserve values in the case of a disconnect
 	// while loading. Without this, someone could load into a game playing the wrong char
